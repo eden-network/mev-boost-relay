@@ -30,13 +30,10 @@ func parseIndexTemplate() (*template.Template, error) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width">
 
-    <title>Flashbots Boost Relay - {{ .Network }}</title>
+    <title>Eden Relay - {{ .Network }}</title>
 
     <meta name="description"
-        content="Flashbots testing relay for maximal extractable value in Ethereum proof-of-stake.">
-    <link data-react-helmet="true" rel="shortcut icon" href="https://writings.flashbots.net/img/favicon.ico">
-    <meta property="og:image"
-        content="https://d33wubrfki0l68.cloudfront.net/ae8530415158fbbbbe17fb033855452f792606c7/fe19f/img/logo.png" />
+        content="Eden testing relay for maximal extractable value in Ethereum proof-of-stake.">
 
     <link rel="stylesheet" href="https://unpkg.com/purecss@2.1.0/build/pure-min.css"
         integrity="sha384-yHIFVG6ClnONEA5yB5DJXfW2/KC173DIQrYoZMEtBvGzmf0PKiGyNEqe9N6BNDBH" crossorigin="anonymous">
@@ -83,7 +80,7 @@ func parseIndexTemplate() (*template.Template, error) {
             <img style="float:right;"
                 src="https://d33wubrfki0l68.cloudfront.net/ae8530415158fbbbbe17fb033855452f792606c7/fe19f/img/logo.png" />
             <h1>
-                Flashbots Boost Relay - {{ .Network }}
+                Eden Relay - {{ .Network }}
             </h1>
 
             <p>
@@ -102,8 +99,7 @@ func parseIndexTemplate() (*template.Template, error) {
                 More infos, issues &amp; feedback:
             </p>
             <ul>
-                <li><a href="https://flashbots.notion.site/Relay-API-Spec-5fb0819366954962bc02e81cb33840f5">Relay API
-                        docs</a></li>
+                <li><a href="https://docs.edennetwork.io">Relay Docs</a></li>
                 <li><a href="http://boost.flashbots.net">boost.flashbots.net</a></li>
                 <li><a href="https://github.com/flashbots/mev-boost">github.com/flashbots/mev-boost</a></li>
                 <li><a
