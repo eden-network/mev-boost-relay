@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"os"
+	"strings"
 
 	"github.com/flashbots/mev-boost-relay/beaconclient"
 	"github.com/flashbots/mev-boost-relay/common"
@@ -17,12 +17,11 @@ func init() {
 	housekeeperCmd.Flags().BoolVar(&logJSON, "json", defaultLogJSON, "log in JSON format instead of text")
 	housekeeperCmd.Flags().StringVar(&logLevel, "loglevel", defaultLogLevel, "log-level: trace, debug, info, warn/warning, error, fatal, panic")
 
-	housekeeperCmd.Flags().StringVar(&beaconNodeURI, "beacon-uri", defaultBeaconURI, "beacon endpoint")
-	housekeeperCmd.Flags().StringVar(&redisURI, "redis-uri", defaultredisURI, "redis uri")
-	housekeeperCmd.Flags().StringVar(&postgresDSN, "db", os.Getenv("POSTGRES_DSN"), "PostgreSQL DSN")
+	housekeeperCmd.Flags().StringSliceVar(&beaconNodeURIs, "beacon-uris", defaultBeaconURIs, "beacon endpoints")
+	housekeeperCmd.Flags().StringVar(&redisURI, "redis-uri", defaultRedisURI, "redis uri")
+	housekeeperCmd.Flags().StringVar(&postgresDSN, "db", defaultPostgresDSN, "PostgreSQL DSN")
 
-	housekeeperCmd.Flags().StringVar(&network, "network", "", "Which network to use")
-	_ = housekeeperCmd.MarkFlagRequired("network")
+	housekeeperCmd.Flags().StringVar(&network, "network", defaultNetwork, "Which network to use")
 }
 
 var housekeeperCmd = &cobra.Command{
@@ -32,7 +31,7 @@ var housekeeperCmd = &cobra.Command{
 		var err error
 
 		common.LogSetup(logJSON, logLevel)
-		log := logrus.WithField("module", "cmd/metrics-saver")
+		log := logrus.WithField("module", "cmd/housekeeper")
 		log.Infof("boost-relay %s", Version)
 
 		networkInfo, err := common.NewEthNetworkDetails(network)
@@ -41,9 +40,16 @@ var housekeeperCmd = &cobra.Command{
 		}
 		log.Infof("Using network: %s", networkInfo.Name)
 
-		// Connect to beacon client and ensure it's synced
-		log.Infof("Using beacon endpoint: %s", beaconNodeURI)
-		beaconClient := beaconclient.NewProdBeaconClient(log, beaconNodeURI)
+		// Connect to beacon clients and ensure it's synced
+		if len(beaconNodeURIs) == 0 {
+			log.Fatalf("no beacon endpoints specified")
+		}
+		log.Infof("Using beacon endpoints: %s", strings.Join(beaconNodeURIs, ", "))
+		var beaconInstances []beaconclient.IBeaconInstance
+		for _, uri := range beaconNodeURIs {
+			beaconInstances = append(beaconInstances, beaconclient.NewProdBeaconInstance(log, uri))
+		}
+		beaconClient := beaconclient.NewMultiBeaconClient(log, beaconInstances)
 
 		// Connect to Redis and setup the datastore
 		redis, err := datastore.NewRedisCache(redisURI, networkInfo.Name)
@@ -54,12 +60,12 @@ var housekeeperCmd = &cobra.Command{
 		log.Infof("Connecting to Postgres database...")
 		db, err := database.NewDatabaseService(postgresDSN)
 		if err != nil {
-			log.WithError(err).Fatalf("Failed to connect to Postgres database")
+			log.WithError(err).Fatalf("Failed to connect to Postgres database at %s", postgresDSN)
 		}
 
 		ds, err := datastore.NewDatastore(log, redis, db)
 		if err != nil {
-			log.WithError(err).Fatalf("Failed to connect to Postgres database at %s", postgresDSN)
+			log.WithError(err).Fatalf("Failed to create datastore")
 		}
 
 		opts := &housekeeper.HousekeeperOpts{
@@ -69,7 +75,7 @@ var housekeeperCmd = &cobra.Command{
 			BeaconClient: beaconClient,
 		}
 		service := housekeeper.NewHousekeeper(opts)
-		log.Info("Starting service...")
+		log.Info("Starting housekeeper service...")
 		err = service.Start()
 		log.WithError(err).Fatalf("Failed to start housekeeper")
 	},

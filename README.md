@@ -2,7 +2,6 @@
 
 [![Goreport status](https://goreportcard.com/badge/github.com/flashbots/mev-boost-relay)](https://goreportcard.com/report/github.com/flashbots/mev-boost-relay)
 [![Test status](https://github.com/flashbots/mev-boost-relay/workflows/Checks/badge.svg)](https://github.com/flashbots/mev-boost-relay/actions?query=workflow%3A%22Checks%22)
-[![standard-readme compliant](https://img.shields.io/badge/readme%20style-standard-brightgreen.svg?style=round-square)](https://github.com/RichardLitt/standard-readme)
 
 Flashbots mev-boost relay for proposer/builder separation in Ethereum.
 
@@ -10,17 +9,18 @@ Provides the builder-specs API for Ethereum proof-of-stake validators, an API fo
 
 The relay consists of several components that are designed to run and scale independently and to be as simple as possible:
 
-1. Housekeeper: update known validators, proposer duties. Soon: save metrics, etc.
-2. API: for proposer, block builder, data
-3. Website: handles the root website requests (information is pulled from Redis and database)
+1. [Housekeeper](https://github.com/flashbots/mev-boost-relay/tree/main/services/housekeeper): update known validators, proposer duties. Soon: save metrics, etc.
+2. [API](https://github.com/flashbots/mev-boost-relay/tree/main/services/api): for proposer, block builder, data
+3. [Website](https://github.com/flashbots/mev-boost-relay/tree/main/services/website): handles the root website requests (information is pulled from Redis and database)
 
-This software is currently in **alpha state**, and there'll be significant changes in the following weeks. In particular major database schema changes, decoupling of block submissions from the proposer API and proper expiy of Redis entries.
+This software is currently in **alpha state**, and there'll be significant changes in the following weeks. In particular major database schema changes, decoupling of block submissions from the proposer API and proper expiry of Redis entries.
 
 See also:
 
-* [mev-boost](https://github.com/flashbots/mev-boost/)
-* [Relay API Spec](https://flashbots.notion.site/Relay-API-Spec-5fb0819366954962bc02e81cb33840f5)
-* [builder-relay-goerli.flashbots.net](https://builder-relay-goerli.flashbots.net/)
+* [Relay API docs](https://flashbots.notion.site/Relay-API-Spec-5fb0819366954962bc02e81cb33840f5)
+* [Docker images](https://hub.docker.com/r/flashbots/mev-boost-relay)
+* [Mainnet relay](https://boost-relay.flashbots.net)
+* [mev-boost](https://github.com/flashbots/mev-boost)
 
 ---
 
@@ -47,16 +47,18 @@ Read more in [Why run mev-boost?](https://writings.flashbots.net/writings/why-ru
 
 # Usage
 
-Redis (v6+) and PostgreSQL is used.
-
 ```bash
 # Start PostgreSQL & Redis in Docker
 docker-compose up
+
+# Or start services individually:
+docker run -p 5432:5432 -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres postgres
+docker run -p 6379:6379 redis
 ```
 
-(you can now visit adminer on http://localhost:8093/?username=postgres)
+Note: this also runs an Adminer (a web frontend for Postgres) on http://localhost:8093/?username=postgres (db: `postgres`, username: `postgres`, password: `postgres`)
 
-The services need access to a beacon node for event subscriptions and the beacon API (by default using `localhost:3500` which is the Prysm default beacon-API port). You can proxy the port from a server like this:
+The services need access to a beacon node for event subscriptions. You can also specify multiple beacon nodes by providing a comma separated list of beacon node URIs. The beacon API by default is using `localhost:3500` (the Prysm default beacon-API port). You can proxy the port from a server like this:
 
 ```bash
 ssh -L 3500:localhost:3500 your_server
@@ -87,11 +89,9 @@ redis-cli DEL boost-relay/kiln:validators-registration boost-relay/kiln:validato
 Env vars:
 
 * `DB_TABLE_PREFIX` - prefix to use for db tables (default uses `dev`)
-* `ENABLE_ZERO_VALUE_BLOCKS` - allow blocks with 0 value
-* `SYNC_VALIDATOR_REGISTRATIONS` - handle validator registrations synchronously instead of in a background worker pool
 * `BLOCKSIM_MAX_CONCURRENT` - maximum number of concurrent block-sim requests
-* `ALLOW_BLOCK_VERIFICATION_FAIL` - accept block even if block simulation & verification fails
-* `DISABLE_BID_MEMORY_CACHE` - force bids to go through redis/db
+* `DISABLE_BID_MEMORY_CACHE` - disable bids to go through in-memory cache. forces to go through redis/db
+* `DISABLE_BID_REDIS_CACHE` - disable bids to go through redis cache. forces to go through memory/db
 
 # Maintainers
 

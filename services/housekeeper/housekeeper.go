@@ -10,7 +10,6 @@ package housekeeper
 import (
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -27,7 +26,7 @@ type HousekeeperOpts struct {
 	Log          *logrus.Entry
 	Redis        *datastore.RedisCache
 	Datastore    *datastore.Datastore
-	BeaconClient *beaconclient.ProdBeaconClient
+	BeaconClient beaconclient.IMultiBeaconClient
 }
 
 type Housekeeper struct {
@@ -36,35 +35,24 @@ type Housekeeper struct {
 
 	datastore    *datastore.Datastore
 	redis        *datastore.RedisCache
-	beaconClient *beaconclient.ProdBeaconClient
+	beaconClient beaconclient.IMultiBeaconClient
 
 	isStarted                uberatomic.Bool
 	isUpdatingProposerDuties uberatomic.Bool
 	proposerDutiesSlot       uint64
 
-	headSlot uint64
-
-	// feature flags
-	ffAllowSyncingBeaconNode bool
+	headSlot uberatomic.Uint64
 }
 
-var (
-	ErrServerAlreadyStarted = errors.New("server was already started")
-	ErrBeaconNodeSyncing    = errors.New("beacon node is syncing")
-)
+var ErrServerAlreadyStarted = errors.New("server was already started")
 
 func NewHousekeeper(opts *HousekeeperOpts) *Housekeeper {
 	server := &Housekeeper{
 		opts:         opts,
-		log:          opts.Log.WithField("module", "housekeeper"),
+		log:          opts.Log.WithField("module", "relay/housekeeper"),
 		redis:        opts.Redis,
 		datastore:    opts.Datastore,
 		beaconClient: opts.BeaconClient,
-	}
-
-	if os.Getenv("ALLOW_SYNCING_BEACON_NODE") != "" {
-		server.log.Warn("env: ALLOW_SYNCING_BEACON_NODE: allow syncing beacon node")
-		server.ffAllowSyncingBeaconNode = true
 	}
 
 	return server
@@ -77,30 +65,38 @@ func (hk *Housekeeper) Start() (err error) {
 		return ErrServerAlreadyStarted
 	}
 
-	// Check beacon-node sync status, process current slot and start slot updates
-	syncStatus, err := hk.beaconClient.SyncStatus()
+	// Get best beacon-node status by head slot, process current slot and start slot updates
+	bestSyncStatus, err := hk.beaconClient.BestSyncStatus()
 	if err != nil {
 		return err
 	}
-	if syncStatus.IsSyncing && !hk.ffAllowSyncingBeaconNode {
-		return ErrBeaconNodeSyncing
-	}
 
-	// Start regular known validator updates
+	// Periodic tasks: update known validator, log number of registered validators
 	go func() {
 		for {
+			// Print number of registered validators
+			numRegisteredValidators, err := hk.redis.NumRegisteredValidators()
+			if err == nil {
+				hk.log.WithField("numRegisteredValidators", numRegisteredValidators).Infof("registered validators: %d", numRegisteredValidators)
+			} else {
+				hk.log.WithError(err).Error("failed to get number of registered validators")
+			}
+
+			// Update known validators
 			hk.updateKnownValidators()
+
+			// Wait half an epoch
 			time.Sleep(common.DurationPerEpoch / 2)
 		}
 	}()
 
 	// Process the current slot
-	headSlot := syncStatus.HeadSlot
+	headSlot := bestSyncStatus.HeadSlot
 	hk.processNewSlot(headSlot)
 
 	// Start regular slot updates
 	c := make(chan beaconclient.HeadEventData)
-	go hk.beaconClient.SubscribeToHeadEvents(c)
+	hk.beaconClient.SubscribeToHeadEvents(c)
 	for {
 		headEvent := <-c
 		hk.processNewSlot(headEvent.Slot)
@@ -108,17 +104,19 @@ func (hk *Housekeeper) Start() (err error) {
 }
 
 func (hk *Housekeeper) processNewSlot(headSlot uint64) {
-	if headSlot <= hk.headSlot {
+	prevHeadSlot := hk.headSlot.Load()
+	if headSlot <= prevHeadSlot {
 		return
 	}
 
 	log := hk.log.WithFields(logrus.Fields{
 		"headSlot":     headSlot,
-		"prevHeadSlot": hk.headSlot,
+		"prevHeadSlot": prevHeadSlot,
 	})
-	if hk.headSlot > 0 {
-		for s := hk.headSlot + 1; s < headSlot; s++ {
-			log.WithField("slot", s).Warn("missed slot")
+
+	if prevHeadSlot > 0 {
+		for s := prevHeadSlot + 1; s < headSlot; s++ {
+			log.WithField("missedSlot", s).Warnf("missed slot: %d", s)
 		}
 	}
 
@@ -131,7 +129,7 @@ func (hk *Housekeeper) processNewSlot(headSlot uint64) {
 		}
 	}()
 
-	hk.headSlot = headSlot
+	hk.headSlot.Store(headSlot)
 	currentEpoch := headSlot / uint64(common.SlotsPerEpoch)
 	log.WithFields(logrus.Fields{
 		"epoch":              currentEpoch,
@@ -142,9 +140,10 @@ func (hk *Housekeeper) processNewSlot(headSlot uint64) {
 func (hk *Housekeeper) updateKnownValidators() {
 	// Query beacon node for known validators
 	hk.log.Debug("Querying validators from beacon node... (this may take a while)")
-	validators, err := hk.beaconClient.FetchValidators()
+
+	validators, err := hk.beaconClient.FetchValidators(hk.headSlot.Load())
 	if err != nil {
-		hk.log.WithError(err).Fatal("failed to fetch validators from beacon node")
+		hk.log.WithError(err).Error("failed to fetch validators from all beacon nodes")
 		return
 	}
 
@@ -164,9 +163,9 @@ func (hk *Housekeeper) updateKnownValidators() {
 
 	for _, v := range validators {
 		pubkey := types.PubkeyHex(v.Validator.Pubkey)
-		err = hk.redis.SetKnownValidator(pubkey, v.Index)
+		err := hk.redis.SetKnownValidator(pubkey, v.Index)
 		if err != nil {
-			log.WithError(err).WithField("pubkey", pubkey).Fatal("failed to set known validator in Redis")
+			log.WithError(err).WithField("pubkey", pubkey).Error("failed to set known validator in Redis")
 		}
 	}
 }
@@ -193,7 +192,7 @@ func (hk *Housekeeper) updateProposerDuties(headSlot uint64) {
 	// Query current epoch
 	r, err := hk.beaconClient.GetProposerDuties(epoch)
 	if err != nil {
-		log.WithError(err).Fatal("failed to get proposer duties")
+		log.WithError(err).Error("failed to get proposer duties for all beacon nodes")
 		return
 	}
 
@@ -201,10 +200,10 @@ func (hk *Housekeeper) updateProposerDuties(headSlot uint64) {
 
 	// Query next epoch
 	r2, err := hk.beaconClient.GetProposerDuties(epoch + 1)
-	if err == nil {
+	if r2 != nil {
 		entries = append(entries, r2.Data...)
 	} else {
-		log.WithError(err).Error("failed to get proposer duties for next epoch")
+		log.WithError(err).Error("failed to get proposer duties for next epoch for all beacon nodes")
 	}
 
 	// Validator registrations are queried in parallel, and this is the result struct
@@ -230,7 +229,7 @@ func (hk *Housekeeper) updateProposerDuties(headSlot uint64) {
 	for i := 0; i < cap(c); i++ {
 		res := <-c
 		if res.err != nil {
-			log.WithError(err).Fatal("error in loading validator registration from redis")
+			log.WithError(res.err).Error("error in loading validator registration from redis")
 		} else if res.val.Entry != nil { // only if a known registration
 			proposerDuties = append(proposerDuties, res.val)
 		}
@@ -239,7 +238,7 @@ func (hk *Housekeeper) updateProposerDuties(headSlot uint64) {
 	// Save duties to Redis
 	err = hk.redis.SetProposerDuties(proposerDuties)
 	if err != nil {
-		log.WithError(err).Fatal("failed to set proposer duties")
+		log.WithError(err).Error("failed to set proposer duties")
 		return
 	}
 	hk.proposerDutiesSlot = headSlot

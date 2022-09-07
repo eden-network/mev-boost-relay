@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"os"
+	"strings"
+
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/flashbots/go-boost-utils/bls"
 	"github.com/flashbots/mev-boost-relay/beaconclient"
@@ -12,33 +15,36 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const (
-	apiDefaultListenAddr = "localhost:9062"
-	apiDefaultBlockSim   = "http://localhost:8545"
-)
-
 var (
+	apiDefaultListenAddr   = common.GetEnv("LISTEN_ADDR", "localhost:9062")
+	apiDefaultBlockSim     = common.GetEnv("BLOCKSIM_URI", "http://localhost:8545")
+	apiDefaultSecretKey    = common.GetEnv("SECRET_KEY", "")
+	apiDefaultPprofEnabled = os.Getenv("PPROF") != ""
+	apiDefaultLogTag       = os.Getenv("LOG_TAG")
+
 	apiListenAddr   string
 	apiPprofEnabled bool
 	apiSecretKey    string
 	apiBlockSimURL  string
+	apiDebug        bool
+	apiLogTag       string
 )
 
 func init() {
 	rootCmd.AddCommand(apiCmd)
 	apiCmd.Flags().BoolVar(&logJSON, "json", defaultLogJSON, "log in JSON format instead of text")
 	apiCmd.Flags().StringVar(&logLevel, "loglevel", defaultLogLevel, "log-level: trace, debug, info, warn/warning, error, fatal, panic")
+	apiCmd.Flags().StringVar(&apiLogTag, "log-tag", apiDefaultLogTag, "if set, a 'tag' field will be added to all log entries")
+	apiCmd.Flags().BoolVar(&apiDebug, "debug", false, "debug logging")
 
 	apiCmd.Flags().StringVar(&apiListenAddr, "listen-addr", apiDefaultListenAddr, "listen address for webserver")
-	apiCmd.Flags().StringVar(&beaconNodeURI, "beacon-uri", defaultBeaconURI, "beacon endpoint")
-	apiCmd.Flags().StringVar(&redisURI, "redis-uri", defaultredisURI, "redis uri")
-	apiCmd.Flags().StringVar(&postgresDSN, "db", "", "PostgreSQL DSN")
-	apiCmd.Flags().StringVar(&apiSecretKey, "secret-key", "", "secret key for signing bids")
-	apiCmd.Flags().BoolVar(&apiPprofEnabled, "pprof", false, "enable pprof API")
+	apiCmd.Flags().StringSliceVar(&beaconNodeURIs, "beacon-uris", defaultBeaconURIs, "beacon endpoints")
+	apiCmd.Flags().StringVar(&redisURI, "redis-uri", defaultRedisURI, "redis uri")
+	apiCmd.Flags().StringVar(&postgresDSN, "db", defaultPostgresDSN, "PostgreSQL DSN")
+	apiCmd.Flags().StringVar(&apiSecretKey, "secret-key", apiDefaultSecretKey, "secret key for signing bids")
+	apiCmd.Flags().BoolVar(&apiPprofEnabled, "pprof", apiDefaultPprofEnabled, "enable pprof API")
 	apiCmd.Flags().StringVar(&apiBlockSimURL, "blocksim", apiDefaultBlockSim, "URL for block simulator")
-
-	apiCmd.Flags().StringVar(&network, "network", "", "Which network to use")
-	_ = apiCmd.MarkFlagRequired("network")
+	apiCmd.Flags().StringVar(&network, "network", defaultNetwork, "Which network to use")
 }
 
 var apiCmd = &cobra.Command{
@@ -47,8 +53,15 @@ var apiCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		var err error
 
+		if apiDebug {
+			logLevel = "debug"
+		}
+
 		common.LogSetup(logJSON, logLevel)
 		log := logrus.WithField("module", "cmd/api")
+		if apiLogTag != "" {
+			log = logrus.WithField("tag", apiLogTag)
+		}
 		log.Infof("boost-relay %s", Version)
 
 		networkInfo, err := common.NewEthNetworkDetails(network)
@@ -57,9 +70,16 @@ var apiCmd = &cobra.Command{
 		}
 		log.Infof("Using network: %s", networkInfo.Name)
 
-		// Connect to beacon client and ensure it's synced
-		log.Infof("Using beacon endpoint: %s", beaconNodeURI)
-		beaconClient := beaconclient.NewProdBeaconClient(log, beaconNodeURI)
+		// Connect to beacon clients and ensure it's synced
+		if len(beaconNodeURIs) == 0 {
+			log.Fatalf("no beacon endpoints specified")
+		}
+		log.Infof("Using beacon endpoints: %s", strings.Join(beaconNodeURIs, ", "))
+		var beaconInstances []beaconclient.IBeaconInstance
+		for _, uri := range beaconNodeURIs {
+			beaconInstances = append(beaconInstances, beaconclient.NewProdBeaconInstance(log, uri))
+		}
+		beaconClient := beaconclient.NewMultiBeaconClient(log, beaconInstances)
 
 		// Connect to Redis
 		redis, err := datastore.NewRedisCache(redisURI, networkInfo.Name)
@@ -80,16 +100,6 @@ var apiCmd = &cobra.Command{
 			log.WithError(err).Fatalf("Failed setting up prod datastore")
 		}
 
-		// Decode the private key
-		envSkBytes, err := hexutil.Decode(apiSecretKey)
-		if err != nil {
-			log.WithError(err).Fatal("incorrect secret key provided")
-		}
-		sk, err := bls.SecretKeyFromBytes(envSkBytes[:])
-		if err != nil {
-			log.WithError(err).Fatal("incorrect builder API secret key provided")
-		}
-
 		opts := api.RelayAPIOpts{
 			Log:           log,
 			ListenAddr:    apiListenAddr,
@@ -98,9 +108,27 @@ var apiCmd = &cobra.Command{
 			Redis:         redis,
 			DB:            db,
 			EthNetDetails: *networkInfo,
-			PprofAPI:      apiPprofEnabled,
-			SecretKey:     sk,
 			BlockSimURL:   apiBlockSimURL,
+
+			ProposerAPI:     true,
+			BlockBuilderAPI: true,
+			DataAPI:         true,
+			PprofAPI:        apiPprofEnabled,
+		}
+
+		// Decode the private key
+		if apiSecretKey == "" {
+			log.Warn("No secret key specified, block builder API is disabled")
+			opts.BlockBuilderAPI = false
+		} else {
+			envSkBytes, err := hexutil.Decode(apiSecretKey)
+			if err != nil {
+				log.WithError(err).Fatal("incorrect secret key provided")
+			}
+			opts.SecretKey, err = bls.SecretKeyFromBytes(envSkBytes[:])
+			if err != nil {
+				log.WithError(err).Fatal("incorrect builder API secret key provided")
+			}
 		}
 
 		// Create the relay service

@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+
 	"github.com/flashbots/mev-boost-relay/common"
 	"github.com/flashbots/mev-boost-relay/database"
 	"github.com/flashbots/mev-boost-relay/datastore"
@@ -9,11 +11,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const (
-	websiteDefaultListenAddr = "localhost:9060"
-)
+var (
+	websiteDefaultListenAddr = common.GetEnv("LISTEN_ADDR", "localhost:9060")
 
-var websiteListenAddr string
+	websiteListenAddr     string
+	websitePubkeyOverride string
+)
 
 func init() {
 	rootCmd.AddCommand(websiteCmd)
@@ -21,11 +24,11 @@ func init() {
 	websiteCmd.Flags().StringVar(&logLevel, "loglevel", defaultLogLevel, "log-level: trace, debug, info, warn/warning, error, fatal, panic")
 
 	websiteCmd.Flags().StringVar(&websiteListenAddr, "listen-addr", websiteDefaultListenAddr, "listen address for webserver")
-	websiteCmd.Flags().StringVar(&redisURI, "redis-uri", defaultredisURI, "redis uri")
-	websiteCmd.Flags().StringVar(&postgresDSN, "db", "", "PostgreSQL DSN")
+	websiteCmd.Flags().StringVar(&redisURI, "redis-uri", defaultRedisURI, "redis uri")
+	websiteCmd.Flags().StringVar(&postgresDSN, "db", defaultPostgresDSN, "PostgreSQL DSN")
+	websiteCmd.Flags().StringVar(&websitePubkeyOverride, "pubkey-override", os.Getenv("PUBKEY_OVERRIDE"), "override for public key")
 
-	websiteCmd.Flags().StringVar(&network, "network", "", "Which network to use")
-	_ = websiteCmd.MarkFlagRequired("network")
+	websiteCmd.Flags().StringVar(&network, "network", defaultNetwork, "Which network to use")
 }
 
 var websiteCmd = &cobra.Command{
@@ -51,9 +54,14 @@ var websiteCmd = &cobra.Command{
 			log.WithError(err).Fatalf("Failed to connect to Redis at %s", redisURI)
 		}
 
-		relayPubkey, err := redis.GetRelayConfig(datastore.RedisConfigFieldPubkey)
-		if err != nil {
-			log.WithError(err).Fatal("failed getting pubkey from Redis")
+		relayPubkey := ""
+		if websitePubkeyOverride != "" {
+			relayPubkey = websitePubkeyOverride
+		} else {
+			relayPubkey, err = redis.GetRelayConfig(datastore.RedisConfigFieldPubkey)
+			if err != nil {
+				log.WithError(err).Fatal("failed getting pubkey from Redis")
+			}
 		}
 
 		// Connect to Postgres
