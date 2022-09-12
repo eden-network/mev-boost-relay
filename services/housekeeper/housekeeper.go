@@ -25,7 +25,6 @@ import (
 type HousekeeperOpts struct {
 	Log          *logrus.Entry
 	Redis        *datastore.RedisCache
-	Datastore    *datastore.Datastore
 	BeaconClient beaconclient.IMultiBeaconClient
 }
 
@@ -33,7 +32,6 @@ type Housekeeper struct {
 	opts *HousekeeperOpts
 	log  *logrus.Entry
 
-	datastore    *datastore.Datastore
 	redis        *datastore.RedisCache
 	beaconClient beaconclient.IMultiBeaconClient
 
@@ -49,9 +47,8 @@ var ErrServerAlreadyStarted = errors.New("server was already started")
 func NewHousekeeper(opts *HousekeeperOpts) *Housekeeper {
 	server := &Housekeeper{
 		opts:         opts,
-		log:          opts.Log.WithField("module", "relay/housekeeper"),
+		log:          opts.Log,
 		redis:        opts.Redis,
-		datastore:    opts.Datastore,
 		beaconClient: opts.BeaconClient,
 	}
 
@@ -81,6 +78,9 @@ func (hk *Housekeeper) Start() (err error) {
 			} else {
 				hk.log.WithError(err).Error("failed to get number of registered validators")
 			}
+
+			// Update builder status in Redis (from database)
+			go hk.updateBuilderStatusInRedis()
 
 			// Update known validators
 			hk.updateKnownValidators()
@@ -134,14 +134,14 @@ func (hk *Housekeeper) processNewSlot(headSlot uint64) {
 	log.WithFields(logrus.Fields{
 		"epoch":              currentEpoch,
 		"slotStartNextEpoch": (currentEpoch + 1) * uint64(common.SlotsPerEpoch),
-	}).Infof("updated headSlot")
+	}).Infof("updated headSlot to %d", headSlot)
 }
 
 func (hk *Housekeeper) updateKnownValidators() {
 	// Query beacon node for known validators
 	hk.log.Debug("Querying validators from beacon node... (this may take a while)")
 
-	validators, err := hk.beaconClient.FetchValidators(hk.headSlot.Load())
+	validators, err := hk.beaconClient.FetchValidators(hk.headSlot.Load() - 1) // -1 to avoid "Invalid state ID: requested slot number is higher than head slot number" with multiple BNs
 	if err != nil {
 		hk.log.WithError(err).Error("failed to fetch validators from all beacon nodes")
 		return
@@ -216,7 +216,7 @@ func (hk *Housekeeper) updateProposerDuties(headSlot uint64) {
 	c := make(chan result, len(entries))
 	for i := 0; i < cap(c); i++ {
 		go func(duty beaconclient.ProposerDutiesResponseData) {
-			reg, err := hk.datastore.GetValidatorRegistration(types.NewPubkeyHex(duty.Pubkey))
+			reg, err := hk.redis.GetValidatorRegistration(types.NewPubkeyHex(duty.Pubkey))
 			c <- result{types.BuilderGetValidatorsResponseEntry{
 				Slot:  duty.Slot,
 				Entry: reg,
@@ -250,4 +250,8 @@ func (hk *Housekeeper) updateProposerDuties(headSlot uint64) {
 	}
 	sort.Strings(_duties)
 	log.WithField("numDuties", len(_duties)).Infof("proposer duties updated: %s", strings.Join(_duties, ", "))
+}
+
+func (hk *Housekeeper) updateBuilderStatusInRedis() {
+	// builders, err := hk.da
 }
