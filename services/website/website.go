@@ -122,6 +122,7 @@ func (srv *Webserver) StartServer() (err error) {
 func (srv *Webserver) getRouter() http.Handler {
 	r := mux.NewRouter()
 	r.HandleFunc("/", srv.handleRoot).Methods(http.MethodGet)
+	r.HandleFunc("/info", srv.handleRoot).Methods(http.MethodGet)
 	loggedRouter := httplogger.LoggingMiddlewareLogrus(srv.log, r)
 	return loggedRouter
 }
