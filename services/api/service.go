@@ -696,12 +696,12 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 	}
 
 	// Verify the signature
-	ok, err := types.VerifySignature(payload.Message, api.opts.EthNetDetails.DomainBuilder, payload.Message.BuilderPubkey[:], payload.Signature[:])
-	if !ok || err != nil {
-		log.WithError(err).Warnf("could not verify builder signature")
-		api.RespondError(w, http.StatusBadRequest, "invalid signature")
-		return
-	}
+	// ok, err := types.VerifySignature(payload.Message, api.opts.EthNetDetails.DomainBuilder, payload.Message.BuilderPubkey[:], payload.Signature[:])
+	// if !ok || err != nil {
+	// 	log.WithError(err).Warnf("could not verify builder signature")
+	// 	api.RespondError(w, http.StatusBadRequest, "invalid signature")
+	// 	return
+	// }
 
 	var simErr error
 	isMostProfitableBlock := false
@@ -720,23 +720,23 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 		}
 	}()
 
-	// Simulate the block submission and save to db
-	t := time.Now()
-	simErr = api.blockSimRateLimiter.send(req.Context(), payload, builderIsHighPrio)
+	// // Simulate the block submission and save to db
+	// t := time.Now()
+	// simErr = api.blockSimRateLimiter.send(req.Context(), payload, builderIsHighPrio)
 
-	if simErr != nil {
-		log.WithError(simErr).WithFields(logrus.Fields{
-			"duration":   time.Since(t).Seconds(),
-			"numWaiting": api.blockSimRateLimiter.currentCounter(),
-		}).Warn("block validation failed")
-		api.RespondError(w, http.StatusBadRequest, simErr.Error())
-		return
-	} else {
-		log.WithFields(logrus.Fields{
-			"duration":   time.Since(t).Seconds(),
-			"numWaiting": api.blockSimRateLimiter.currentCounter(),
-		}).Info("block validation successful")
-	}
+	// if simErr != nil {
+	// 	log.WithError(simErr).WithFields(logrus.Fields{
+	// 		"duration":   time.Since(t).Seconds(),
+	// 		"numWaiting": api.blockSimRateLimiter.currentCounter(),
+	// 	}).Warn("block validation failed")
+	// 	api.RespondError(w, http.StatusBadRequest, simErr.Error())
+	// 	return
+	// } else {
+	// 	log.WithFields(logrus.Fields{
+	// 		"duration":   time.Since(t).Seconds(),
+	// 		"numWaiting": api.blockSimRateLimiter.currentCounter(),
+	// 	}).Info("block validation successful")
+	// }
 
 	// Check if there's already a bid
 	prevBid, err := api.datastore.GetGetHeaderResponse(payload.Message.Slot, payload.Message.ParentHash.String(), payload.Message.ProposerPubkey.String())

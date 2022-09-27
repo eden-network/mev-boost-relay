@@ -38,7 +38,6 @@ func parseIndexTemplate() (*template.Template, error) {
 
     <link rel="stylesheet" data-href="https://fonts.googleapis.com/css2?family=Titillium+Web:wght@300;400;600;700&amp;display=swap"/><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 
-    <link rel="stylesheet" href="https://storage.googleapis.com/eden_brand/img/pure-min.css" integrity="sha384-yHIFVG6ClnONEA5yB5DJXfW2/KC173DIQrYoZMEtBvGzmf0PKiGyNEqe9N6BNDBH" crossorigin="anonymous">
     <link rel="stylesheet" href="https://cdn.rawgit.com/Arch-Matt/M-grid/ff2ee025/m-grid-min.1.0.0.css">
 
 
@@ -102,8 +101,13 @@ func parseIndexTemplate() (*template.Template, error) {
 
         input[type="text"] { border:none;background:var(--lightblue);padding:5px 10px;color:#fff;width:100%;text-align:center;margin-top:-10px;display:block; }
 
-        .box { background:var(--darkblue);border-radius:10px;padding:15px 30px;width:100%;height:100%; }
+        .box { background:var(--darkblue);border-radius:10px;padding:15px 30px 30px 30px;width:100%;height:100%; }
         .config-table { width:100%; }
+
+        a:link    { color:var(--green); text-decoration: none; }
+        a:visited { color:var(--green); text-decoration: none; }
+        a:hover   { color: #fff; text-decoration: none; }
+        a:active  { color: #fff; text-decoration: none; }
 
         a.button { background:var(--green);color:var(--darkblue);display:inline-block;margin:7px 7px 7px 7px;padding:15px 30px;width:auto;border-radius:5px;text-decoration: none;font-weight:700; }
         a.button:hover { background:#fff; }
@@ -166,7 +170,6 @@ func parseIndexTemplate() (*template.Template, error) {
 
                         <p>Beacon proposer signing domain:</p>
                         <input type="text" value="{{ .BeaconProposerSigningDomain }}">
-                        <a class="button" target="_block" href="https://v2.docs.edennetwork.io">Relay Docs</a>
                     </div>
                 </div>                
             </div>
@@ -232,7 +235,7 @@ func parseIndexTemplate() (*template.Template, error) {
             <h2>
                 {{.NumPayloadsDelivered}} payloads delivered</p>
             </h2>
-            <a class="button" target="_blank" href="/relay/v1/data/bidtraces/proposer_payload_delivered?limit=10">Data API</a> <a class="button" target="_blank" href="https://v2.docs.edennetwork.io">Docs</a></p>
+            <a class="button" target="_blank" href="/relay/v1/data/bidtraces/proposer_payload_delivered?limit=10">Data API</a> <a class="button" target="_blank" href="https://docs.edennetwork.io">Docs</a></p>
         </div>
     </div>
 </body>
