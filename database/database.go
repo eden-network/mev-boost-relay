@@ -2,9 +2,7 @@
 package database
 
 import (
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -32,7 +30,6 @@ type IDatabaseService interface {
 	GetBlockBuilderByPubkey(pubkey string) (*BlockBuilderEntry, error)
 	SetBlockBuilderStatus(pubkey string, isHighPrio, isBlacklisted bool) error
 	UpsertBlockBuilderEntryAfterSubmission(lastSubmission *BuilderBlockSubmissionEntry, isError, isTopbid bool) error
-	IncBlockBuilderStatsAfterGetHeader(slot uint64, blockhash string) error
 	IncBlockBuilderStatsAfterGetPayload(slot uint64, blockhash string) error
 }
 
@@ -79,23 +76,12 @@ func (s *DatabaseService) SaveValidatorRegistration(registration types.SignedVal
 		Signature:    registration.Signature.String(),
 	}
 
-	// Check if we already have a registration with same or newer timestamp
-	prevEntry := new(ValidatorRegistrationEntry)
-	err := s.DB.Get(prevEntry, "SELECT pubkey, timestamp FROM "+TableValidatorRegistration+" WHERE pubkey = $1", entry.Pubkey)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Insert new entry
-		query := `INSERT INTO ` + TableValidatorRegistration + ` (pubkey, fee_recipient, timestamp, gas_limit, signature) VALUES (:pubkey, :fee_recipient, :timestamp, :gas_limit, :signature)`
-		_, err = s.DB.NamedExec(query, entry)
-		return err
-	} else if err != nil {
-		return err
-	} else if entry.Timestamp > prevEntry.Timestamp {
-		// Update
-		query := `UPDATE ` + TableValidatorRegistration + ` SET fee_recipient=:fee_recipient, timestamp=:timestamp, gas_limit=:gas_limit, signature=:signature WHERE pubkey=:pubkey`
-		_, err = s.DB.NamedExec(query, entry)
-		return err
-	}
-	return nil
+	query := `INSERT INTO ` + TableValidatorRegistration + `
+		(pubkey, fee_recipient, timestamp, gas_limit, signature) VALUES
+		(:pubkey, :fee_recipient, :timestamp, :gas_limit, :signature)
+		ON CONFLICT (pubkey, fee_recipient) DO NOTHING;`
+	_, err := s.DB.NamedExec(query, entry)
+	return err
 }
 
 func (s *DatabaseService) SaveBuilderBlockSubmission(payload *types.BuilderSubmitBlockRequest, simError error, isMostProfitable bool) (entry *BuilderBlockSubmissionEntry, err error) {
@@ -234,33 +220,37 @@ func (s *DatabaseService) SaveDeliveredPayload(slot uint64, proposerPubkey types
 	return err
 }
 
-func (s *DatabaseService) GetRecentDeliveredPayloads(filters GetPayloadsFilters) ([]*DeliveredPayloadEntry, error) {
+func (s *DatabaseService) GetRecentDeliveredPayloads(queryArgs GetPayloadsFilters) ([]*DeliveredPayloadEntry, error) {
 	arg := map[string]interface{}{
-		"limit":           filters.Limit,
-		"slot":            filters.Slot,
-		"cursor":          filters.Cursor,
-		"block_hash":      filters.BlockHash,
-		"block_number":    filters.BlockNumber,
-		"proposer_pubkey": filters.ProposerPubkey,
+		"limit":           queryArgs.Limit,
+		"slot":            queryArgs.Slot,
+		"cursor":          queryArgs.Cursor,
+		"block_hash":      queryArgs.BlockHash,
+		"block_number":    queryArgs.BlockNumber,
+		"proposer_pubkey": queryArgs.ProposerPubkey,
+		"builder_pubkey":  queryArgs.BuilderPubkey,
 	}
 
 	tasks := []*DeliveredPayloadEntry{}
 	fields := "id, inserted_at, slot, epoch, builder_pubkey, proposer_pubkey, proposer_fee_recipient, parent_hash, block_hash, block_number, num_tx, value, gas_used, gas_limit"
 
 	whereConds := []string{}
-	if filters.Slot > 0 {
+	if queryArgs.Slot > 0 {
 		whereConds = append(whereConds, "slot = :slot")
-	} else if filters.Cursor > 0 {
+	} else if queryArgs.Cursor > 0 {
 		whereConds = append(whereConds, "slot <= :cursor")
 	}
-	if filters.BlockHash != "" {
+	if queryArgs.BlockHash != "" {
 		whereConds = append(whereConds, "block_hash = :block_hash")
 	}
-	if filters.BlockNumber > 0 {
+	if queryArgs.BlockNumber > 0 {
 		whereConds = append(whereConds, "block_number = :block_number")
 	}
-	if filters.ProposerPubkey != "" {
+	if queryArgs.ProposerPubkey != "" {
 		whereConds = append(whereConds, "proposer_pubkey = :proposer_pubkey")
+	}
+	if queryArgs.BuilderPubkey != "" {
+		whereConds = append(whereConds, "builder_pubkey = :builder_pubkey")
 	}
 
 	where := ""
@@ -268,7 +258,14 @@ func (s *DatabaseService) GetRecentDeliveredPayloads(filters GetPayloadsFilters)
 		where = "WHERE " + strings.Join(whereConds, " AND ")
 	}
 
-	nstmt, err := s.DB.PrepareNamed(fmt.Sprintf("SELECT %s FROM %s %s ORDER BY id DESC LIMIT :limit", fields, TableDeliveredPayload, where))
+	orderBy := "id DESC"
+	if queryArgs.OrderByValue == 1 {
+		orderBy = "value ASC"
+	} else if queryArgs.OrderByValue == -1 {
+		orderBy = "value DESC"
+	}
+
+	nstmt, err := s.DB.PrepareNamed(fmt.Sprintf("SELECT %s FROM %s %s ORDER BY %s LIMIT :limit", fields, TableDeliveredPayload, where, orderBy))
 	if err != nil {
 		return nil, err
 	}
@@ -285,10 +282,11 @@ func (s *DatabaseService) GetNumDeliveredPayloads() (uint64, error) {
 
 func (s *DatabaseService) GetBuilderSubmissions(filters GetBuilderSubmissionsFilters) ([]*BuilderBlockSubmissionEntry, error) {
 	arg := map[string]interface{}{
-		"limit":        filters.Limit,
-		"slot":         filters.Slot,
-		"block_hash":   filters.BlockHash,
-		"block_number": filters.BlockNumber,
+		"limit":          filters.Limit,
+		"slot":           filters.Slot,
+		"block_hash":     filters.BlockHash,
+		"block_number":   filters.BlockNumber,
+		"builder_pubkey": filters.BuilderPubkey,
 	}
 
 	tasks := []*BuilderBlockSubmissionEntry{}
@@ -306,6 +304,9 @@ func (s *DatabaseService) GetBuilderSubmissions(filters GetBuilderSubmissionsFil
 	}
 	if filters.BlockNumber > 0 {
 		whereConds = append(whereConds, "block_number = :block_number")
+	}
+	if filters.BuilderPubkey != "" {
+		whereConds = append(whereConds, "builder_pubkey = :builder_pubkey")
 	}
 
 	where := ""
@@ -353,14 +354,14 @@ func (s *DatabaseService) UpsertBlockBuilderEntryAfterSubmission(lastSubmission 
 }
 
 func (s *DatabaseService) GetBlockBuilders() ([]*BlockBuilderEntry, error) {
-	query := `SELECT id, inserted_at, builder_pubkey, description, is_high_prio, is_blacklisted, last_submission_id, last_submission_slot, num_submissions_total, num_submissions_simerror, num_submissions_topbid, num_sent_getheader, num_sent_getpayload FROM ` + TableBlockBuilder + ` ORDER BY id ASC;`
+	query := `SELECT id, inserted_at, builder_pubkey, description, is_high_prio, is_blacklisted, last_submission_id, last_submission_slot, num_submissions_total, num_submissions_simerror, num_submissions_topbid, num_sent_getpayload FROM ` + TableBlockBuilder + ` ORDER BY id ASC;`
 	entries := []*BlockBuilderEntry{}
 	err := s.DB.Select(entries, query)
 	return entries, err
 }
 
 func (s *DatabaseService) GetBlockBuilderByPubkey(pubkey string) (*BlockBuilderEntry, error) {
-	query := `SELECT id, inserted_at, builder_pubkey, description, is_high_prio, is_blacklisted, last_submission_id, last_submission_slot, num_submissions_total, num_submissions_simerror, num_submissions_topbid, num_sent_getheader, num_sent_getpayload FROM ` + TableBlockBuilder + ` WHERE builder_pubkey=$1;`
+	query := `SELECT id, inserted_at, builder_pubkey, description, is_high_prio, is_blacklisted, last_submission_id, last_submission_slot, num_submissions_total, num_submissions_simerror, num_submissions_topbid, num_sent_getpayload FROM ` + TableBlockBuilder + ` WHERE builder_pubkey=$1;`
 	entry := &BlockBuilderEntry{}
 	err := s.DB.Get(entry, query, pubkey)
 	return entry, err
@@ -369,17 +370,6 @@ func (s *DatabaseService) GetBlockBuilderByPubkey(pubkey string) (*BlockBuilderE
 func (s *DatabaseService) SetBlockBuilderStatus(pubkey string, isHighPrio, isBlacklisted bool) error {
 	query := `UPDATE ` + TableBlockBuilder + ` SET is_high_prio=$1, is_blacklisted=$2 WHERE builder_pubkey=$3;`
 	_, err := s.DB.Exec(query, isHighPrio, isBlacklisted, pubkey)
-	return err
-}
-
-func (s *DatabaseService) IncBlockBuilderStatsAfterGetHeader(slot uint64, blockhash string) error {
-	query := `UPDATE ` + TableBlockBuilder + `
-		SET num_sent_getheader=num_sent_getheader+1
-		FROM (
-			SELECT builder_pubkey FROM ` + TableBuilderBlockSubmission + ` WHERE slot=$1 AND block_hash=$2
-		) AS sub
-		WHERE ` + TableBlockBuilder + `.builder_pubkey=sub.builder_pubkey;`
-	_, err := s.DB.Exec(query, slot, blockhash)
 	return err
 }
 

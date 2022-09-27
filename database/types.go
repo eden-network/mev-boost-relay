@@ -26,6 +26,8 @@ type GetPayloadsFilters struct {
 	BlockHash      string
 	BlockNumber    uint64
 	ProposerPubkey string
+	BuilderPubkey  string
+	OrderByValue   int8
 }
 
 type GetBuilderSubmissionsFilters struct {
@@ -34,6 +36,7 @@ type GetBuilderSubmissionsFilters struct {
 	BlockHash   string
 	BlockNumber uint64
 	// Cursor      uint64
+	BuilderPubkey string
 }
 
 type ValidatorRegistrationEntry struct {
@@ -135,6 +138,5 @@ type BlockBuilderEntry struct {
 	NumSubmissionsSimError uint64 `db:"num_submissions_simerror" json:"num_submissions_simerror"`
 	NumSubmissionsTopBid   uint64 `db:"num_submissions_topbid"   json:"num_submissions_topbid"`
 
-	NumSentGetHeader  uint64 `db:"num_sent_getheader"  json:"num_sent_getheader"`
 	NumSentGetPayload uint64 `db:"num_sent_getpayload" json:"num_sent_getpayload"`
 }

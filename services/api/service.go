@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NYTimes/gziphandler"
 	"github.com/flashbots/go-boost-utils/bls"
 	"github.com/flashbots/go-boost-utils/types"
 	"github.com/flashbots/go-utils/httplogger"
@@ -78,6 +79,7 @@ type RelayAPIOpts struct {
 	BlockBuilderAPI bool
 	DataAPI         bool
 	PprofAPI        bool
+	InternalAPI     bool
 }
 
 // RelayAPI represents a single Relay instance
@@ -108,10 +110,11 @@ type RelayAPI struct {
 	// Feature flags
 	ffForceGetHeader204      bool
 	ffDisableBlockPublishing bool
+	ffDisableLowPrioBuilders bool
 }
 
 // NewRelayAPI creates a new service. if builders is nil, allow any builder
-func NewRelayAPI(opts RelayAPIOpts) (*RelayAPI, error) {
+func NewRelayAPI(opts RelayAPIOpts) (api *RelayAPI, err error) {
 	if opts.Log == nil {
 		return nil, ErrMissingLogOpt
 	}
@@ -132,7 +135,10 @@ func NewRelayAPI(opts RelayAPIOpts) (*RelayAPI, error) {
 		}
 
 		// If using a secret key, ensure it's the correct one
-		publicKey = types.BlsPublicKeyToPublicKey(bls.PublicKeyFromSecretKey(opts.SecretKey))
+		publicKey, err = types.BlsPublicKeyToPublicKey(bls.PublicKeyFromSecretKey(opts.SecretKey))
+		if err != nil {
+			return nil, err
+		}
 		opts.Log.Infof("Using BLS key: %s", publicKey.String())
 
 		// ensure pubkey is same across all relay instances
@@ -149,7 +155,7 @@ func NewRelayAPI(opts RelayAPIOpts) (*RelayAPI, error) {
 		}
 	}
 
-	api := RelayAPI{
+	api = &RelayAPI{
 		opts:                   opts,
 		log:                    opts.Log,
 		blsSk:                  opts.SecretKey,
@@ -172,7 +178,12 @@ func NewRelayAPI(opts RelayAPIOpts) (*RelayAPI, error) {
 		api.ffDisableBlockPublishing = true
 	}
 
-	return &api, nil
+	if os.Getenv("DISABLE_LOWPRIO_BUILDERS") == "1" {
+		api.log.Warn("env: DISABLE_LOWPRIO_BUILDERS - allowing only high-level builders")
+		api.ffDisableLowPrioBuilders = true
+	}
+
+	return api, nil
 }
 
 func (api *RelayAPI) getRouter() http.Handler {
@@ -182,6 +193,7 @@ func (api *RelayAPI) getRouter() http.Handler {
 
 	// Proposer API
 	if api.opts.ProposerAPI {
+		api.log.Info("proposer API enabled")
 		r.HandleFunc(pathStatus, api.handleStatus).Methods(http.MethodGet)
 		r.HandleFunc(pathRegisterValidator, api.handleRegisterValidator).Methods(http.MethodPost)
 		r.HandleFunc(pathGetHeader, api.handleGetHeader).Methods(http.MethodGet)
@@ -190,12 +202,14 @@ func (api *RelayAPI) getRouter() http.Handler {
 
 	// Builder API
 	if api.opts.BlockBuilderAPI {
+		api.log.Info("block builder API enabled")
 		r.HandleFunc(pathBuilderGetValidators, api.handleBuilderGetValidators).Methods(http.MethodGet)
 		r.HandleFunc(pathSubmitNewBlock, api.handleSubmitNewBlock).Methods(http.MethodPost)
 	}
 
 	// Data API
 	if api.opts.DataAPI {
+		api.log.Info("data API enabled")
 		r.HandleFunc(pathDataProposerPayloadDelivered, api.handleDataProposerPayloadDelivered).Methods(http.MethodGet)
 		r.HandleFunc(pathDataBuilderBidsReceived, api.handleDataBuilderBidsReceived).Methods(http.MethodGet)
 		r.HandleFunc(pathDataValidatorRegistration, api.handleDataValidatorRegistration).Methods(http.MethodGet)
@@ -203,14 +217,20 @@ func (api *RelayAPI) getRouter() http.Handler {
 
 	// Pprof
 	if api.opts.PprofAPI {
+		api.log.Info("pprof API enabled")
 		r.PathPrefix("/debug/pprof/").Handler(http.DefaultServeMux)
 	}
 
-	r.HandleFunc(pathInternalBuilderStatus, api.handleInternalBuilderStatus).Methods(http.MethodGet, http.MethodPost, http.MethodPut)
+	// /internal/...
+	if api.opts.InternalAPI {
+		api.log.Info("internal API enabled")
+		r.HandleFunc(pathInternalBuilderStatus, api.handleInternalBuilderStatus).Methods(http.MethodGet, http.MethodPost, http.MethodPut)
+	}
 
 	// r.Use(mux.CORSMethodMiddleware(r))
 	loggedRouter := httplogger.LoggingMiddlewareLogrus(api.log, r)
-	return loggedRouter
+	withGz := gziphandler.GzipHandler(loggedRouter)
+	return withGz
 }
 
 // StartServer starts the HTTP server for this instance
@@ -375,8 +395,11 @@ func (api *RelayAPI) handleRoot(w http.ResponseWriter, req *http.Request) {
 }
 
 func (api *RelayAPI) handleRegisterValidator(w http.ResponseWriter, req *http.Request) {
+	ua := req.UserAgent()
 	log := api.log.WithFields(logrus.Fields{
-		"method": "registerValidator",
+		"method":    "registerValidator",
+		"ua":        ua,
+		"mevBoostV": common.GetMevBoostVersionFromUserAgent(ua),
 	})
 
 	respondError := func(code int, msg string) {
@@ -407,7 +430,8 @@ func (api *RelayAPI) handleRegisterValidator(w http.ResponseWriter, req *http.Re
 
 		pubkey := registration.Message.Pubkey.PubkeyHex()
 		regLog := api.log.WithFields(logrus.Fields{
-			"pubkey": pubkey,
+			"pubkey":       pubkey,
+			"feeRecipient": registration.Message.FeeRecipient.String(),
 		})
 
 		registrationTime := time.Unix(int64(registration.Message.Timestamp), 0)
@@ -470,11 +494,14 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	slotStr := vars["slot"]
 	parentHashHex := vars["parent_hash"]
 	proposerPubkeyHex := vars["pubkey"]
+	ua := req.UserAgent()
 	log := api.log.WithFields(logrus.Fields{
 		"method":     "getHeader",
 		"slot":       slotStr,
 		"parentHash": parentHashHex,
 		"pubkey":     proposerPubkeyHex,
+		"ua":         ua,
+		"mevBoostV":  common.GetMevBoostVersionFromUserAgent(ua),
 	})
 
 	slot, err := strconv.ParseUint(slotStr, 10, 64)
@@ -497,6 +524,8 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 		api.RespondError(w, http.StatusBadRequest, "slot is too old")
 		return
 	}
+
+	log.Debug("getHeader request received")
 
 	if api.ffForceGetHeader204 {
 		log.Info("forced getHeader 204 response")
@@ -527,14 +556,6 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 		"blockHash": bid.Data.Message.Header.BlockHash.String(),
 	}).Info("bid delivered")
 	api.RespondOK(w, bid)
-
-	// Increment builder stats
-	go func() {
-		err := api.db.IncBlockBuilderStatsAfterGetHeader(slot, bid.Data.Message.Header.BlockHash.String())
-		if err != nil {
-			log.WithError(err).Error("could not increment builder-stats after getHeader")
-		}
-	}()
 }
 
 func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) {
@@ -542,19 +563,23 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 
 	payload := new(types.SignedBlindedBeaconBlock)
 	if err := json.NewDecoder(req.Body).Decode(payload); err != nil {
+		log.Warn("getPayload request failed to decode")
 		api.RespondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	slot := payload.Message.Slot
 	blockHash := payload.Message.Body.ExecutionPayloadHeader.BlockHash
-
+	ua := req.UserAgent()
 	log = log.WithFields(logrus.Fields{
 		"slot":      slot,
 		"blockHash": blockHash.String(),
 		"idArg":     req.URL.Query().Get("id"),
-		"ua":        req.UserAgent(),
+		"ua":        ua,
+		"mevBoostV": common.GetMevBoostVersionFromUserAgent(ua),
 	})
+
+	log.Debug("getPayload request received")
 
 	proposerPubkey, found := api.datastore.GetKnownValidatorPubkeyByIndex(payload.Message.ProposerIndex)
 	if !found {
@@ -582,6 +607,7 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 	}
 
 	// Get the response - from memory, Redis or DB
+	// note that mev-boost might send getPayload for bids of other relays, thus this code wouldn't find anything
 	getPayloadResp, err := api.datastore.GetGetPayloadResponse(slot, proposerPubkey.String(), blockHash.String())
 	if err != nil {
 		log.WithError(err).Error("failed getting execution payload from db")
@@ -590,7 +616,7 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 	}
 
 	if getPayloadResp == nil {
-		log.Error("failed getting execution payload")
+		log.Info("failed getting execution payload")
 		api.RespondError(w, http.StatusBadRequest, "no execution payload for this request")
 		return
 	}
@@ -623,10 +649,7 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 			return
 		}
 		signedBeaconBlock := SignedBlindedBeaconBlockToBeaconBlock(payload, getPayloadResp.Data)
-		_, err := api.beaconClient.PublishBlock(signedBeaconBlock)
-		if err != nil {
-			log.WithError(err).Error("failed to publish beacon block")
-		}
+		_, _ = api.beaconClient.PublishBlock(signedBeaconBlock) // errors are logged inside
 	}()
 }
 
@@ -645,8 +668,13 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 
 	payload := new(types.BuilderSubmitBlockRequest)
 	if err := json.NewDecoder(req.Body).Decode(payload); err != nil {
-		log.WithError(err).Error("could not decode payload")
+		log.WithError(err).Warn("could not decode payload")
 		api.RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if payload.Message == nil || payload.ExecutionPayload == nil {
+		api.RespondError(w, http.StatusBadRequest, "missing parts of the payload")
 		return
 	}
 
@@ -667,6 +695,14 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 		return
 	}
 
+	// In case only high-prio requests are accepted, fail others
+	if api.ffDisableLowPrioBuilders && !builderIsHighPrio {
+		log.Info("rejecting low-prio builder (ff-disable-low-prio-builders)")
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	log = log.WithFields(logrus.Fields{
 		"builderHighPrio": builderIsHighPrio,
 		"proposerPubkey":  payload.Message.ProposerPubkey.String(),
@@ -677,12 +713,14 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 	})
 
 	if payload.Message.Slot <= api.headSlot.Load() {
+		api.log.Info("submitNewBlock failed: submission for past slot")
 		api.RespondError(w, http.StatusBadRequest, "submission for past slot")
 		return
 	}
 
 	// Don't accept blocks with 0 value
 	if payload.Message.Value.Cmp(&ZeroU256) == 0 || len(payload.ExecutionPayload.Transactions) == 0 {
+		api.log.Info("submitNewBlock failed: block with 0 value or no txs")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -858,7 +896,7 @@ func (api *RelayAPI) handleDataProposerPayloadDelivered(w http.ResponseWriter, r
 	args := req.URL.Query()
 
 	filters := database.GetPayloadsFilters{
-		Limit: 100,
+		Limit: 200,
 	}
 
 	if args.Get("slot") != "" && args.Get("cursor") != "" {
@@ -897,13 +935,19 @@ func (api *RelayAPI) handleDataProposerPayloadDelivered(w http.ResponseWriter, r
 	}
 
 	if args.Get("proposer_pubkey") != "" {
-		var proposerPubkey types.PublicKey
-		err = proposerPubkey.UnmarshalText([]byte(args.Get("proposer_pubkey")))
-		if err != nil {
+		if err = checkBLSPublicKeyHex(args.Get("proposer_pubkey")); err != nil {
 			api.RespondError(w, http.StatusBadRequest, "invalid proposer_pubkey argument")
 			return
 		}
 		filters.ProposerPubkey = args.Get("proposer_pubkey")
+	}
+
+	if args.Get("builder_pubkey") != "" {
+		if err = checkBLSPublicKeyHex(args.Get("builder_pubkey")); err != nil {
+			api.RespondError(w, http.StatusBadRequest, "invalid builder_pubkey argument")
+			return
+		}
+		filters.BuilderPubkey = args.Get("builder_pubkey")
 	}
 
 	if args.Get("limit") != "" {
@@ -917,6 +961,12 @@ func (api *RelayAPI) handleDataProposerPayloadDelivered(w http.ResponseWriter, r
 			return
 		}
 		filters.Limit = _limit
+	}
+
+	if args.Get("order_by") == "value" {
+		filters.OrderByValue = 1
+	} else if args.Get("order_by") == "-value" {
+		filters.OrderByValue = -1
 	}
 
 	deliveredPayloads, err := api.db.GetRecentDeliveredPayloads(filters)
@@ -950,10 +1000,11 @@ func (api *RelayAPI) handleDataBuilderBidsReceived(w http.ResponseWriter, req *h
 	args := req.URL.Query()
 
 	filters := database.GetBuilderSubmissionsFilters{
-		Limit:       100,
-		Slot:        0,
-		BlockHash:   "",
-		BlockNumber: 0,
+		Limit:         200,
+		Slot:          0,
+		BlockHash:     "",
+		BlockNumber:   0,
+		BuilderPubkey: "",
 	}
 
 	if args.Get("cursor") != "" {
@@ -988,6 +1039,14 @@ func (api *RelayAPI) handleDataBuilderBidsReceived(w http.ResponseWriter, req *h
 			api.RespondError(w, http.StatusBadRequest, "invalid block_number argument")
 			return
 		}
+	}
+
+	if args.Get("builder_pubkey") != "" {
+		if err = checkBLSPublicKeyHex(args.Get("builder_pubkey")); err != nil {
+			api.RespondError(w, http.StatusBadRequest, "invalid builder_pubkey argument")
+			return
+		}
+		filters.BuilderPubkey = args.Get("builder_pubkey")
 	}
 
 	if args.Get("limit") != "" {

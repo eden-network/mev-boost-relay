@@ -1,6 +1,7 @@
 package website
 
 import (
+	"math/big"
 	"text/template"
 
 	"github.com/flashbots/mev-boost-relay/database"
@@ -19,10 +20,32 @@ type StatusHTMLData struct {
 	HeadSlot                    string
 	NumPayloadsDelivered        string
 	Payloads                    []*database.DeliveredPayloadEntry
+	ValueLink                   string
+	ValueOrderIcon              string
+	ShowConfigDetails           bool
 }
 
-func parseIndexTemplate() (*template.Template, error) {
-	return template.New("index").Parse(`
+func weiToEth(wei string) string {
+	weiBigInt := new(big.Int)
+	weiBigInt.SetString(wei, 10)
+	ethValue := weiBigIntToEthBigFloat(weiBigInt)
+	return ethValue.String()
+}
+
+func weiBigIntToEthBigFloat(wei *big.Int) (ethValue *big.Float) {
+	// wei / 10^18
+	fbalance := new(big.Float)
+	fbalance.SetString(wei.String())
+	ethValue = new(big.Float).Quo(fbalance, big.NewFloat(1e18))
+	return
+}
+
+var funcMap = template.FuncMap{
+	"weiToEth": weiToEth,
+}
+
+func ParseIndexTemplate() (*template.Template, error) {
+	return template.New("index").Funcs(funcMap).Parse(`
 <!DOCTYPE html>
 <html lang="en" class="no-js">
 <head>

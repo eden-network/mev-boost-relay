@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"net/url"
 	"os"
 
 	"github.com/flashbots/mev-boost-relay/common"
@@ -12,10 +13,12 @@ import (
 )
 
 var (
-	websiteDefaultListenAddr = common.GetEnv("LISTEN_ADDR", "localhost:9060")
+	websiteDefaultListenAddr        = common.GetEnv("LISTEN_ADDR", "localhost:9060")
+	websiteDefaultShowConfigDetails = os.Getenv("SHOW_CONFIG_DETAILS") == "1"
 
-	websiteListenAddr     string
-	websitePubkeyOverride string
+	websiteListenAddr        string
+	websitePubkeyOverride    string
+	websiteShowConfigDetails bool
 )
 
 func init() {
@@ -29,6 +32,7 @@ func init() {
 	websiteCmd.Flags().StringVar(&websitePubkeyOverride, "pubkey-override", os.Getenv("PUBKEY_OVERRIDE"), "override for public key")
 
 	websiteCmd.Flags().StringVar(&network, "network", defaultNetwork, "Which network to use")
+	websiteCmd.Flags().BoolVar(&websiteShowConfigDetails, "show-config-details", websiteDefaultShowConfigDetails, "show config details")
 }
 
 var websiteCmd = &cobra.Command{
@@ -38,7 +42,7 @@ var websiteCmd = &cobra.Command{
 		var err error
 
 		common.LogSetup(logJSON, logLevel)
-		log := logrus.WithField("module", "relay/website")
+		log := logrus.WithField("service", "relay/website")
 		log.Infof("boost-relay %s", Version)
 
 		networkInfo, err := common.NewEthNetworkDetails(network)
@@ -66,19 +70,25 @@ var websiteCmd = &cobra.Command{
 
 		// Connect to Postgres
 		log.Infof("Connecting to Postgres database...")
+		dbURL, err := url.Parse(postgresDSN)
+		if err != nil {
+			log.WithError(err).Fatalf("couldn't read db URL")
+		}
+		log.Infof("Connecting to Postgres database at %s%s ...", dbURL.Host, dbURL.Path)
 		db, err := database.NewDatabaseService(postgresDSN)
 		if err != nil {
-			log.WithError(err).Fatalf("Failed to connect to Postgres database at %s", postgresDSN)
+			log.WithError(err).Fatalf("Failed to connect to Postgres database at %s%s", dbURL.Host, dbURL.Path)
 		}
 
 		// Create the website service
 		opts := &website.WebserverOpts{
-			ListenAddress:  websiteListenAddr,
-			RelayPubkeyHex: relayPubkey,
-			NetworkDetails: networkInfo,
-			Redis:          redis,
-			DB:             db,
-			Log:            log,
+			ListenAddress:     websiteListenAddr,
+			RelayPubkeyHex:    relayPubkey,
+			NetworkDetails:    networkInfo,
+			Redis:             redis,
+			DB:                db,
+			Log:               log,
+			ShowConfigDetails: websiteShowConfigDetails,
 		}
 
 		srv, err := website.NewWebserver(opts)

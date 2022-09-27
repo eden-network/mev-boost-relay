@@ -47,7 +47,7 @@ type MultiBeaconClient struct {
 
 func NewMultiBeaconClient(log *logrus.Entry, beaconInstances []IBeaconInstance) *MultiBeaconClient {
 	client := &MultiBeaconClient{
-		log:                      log.WithField("module", "beaconClient"),
+		log:                      log.WithField("component", "beaconClient"),
 		beaconInstances:          beaconInstances,
 		bestBeaconIndex:          *uberatomic.NewInt64(0),
 		ffAllowSyncingBeaconNode: false,
@@ -132,7 +132,7 @@ func (c *MultiBeaconClient) FetchValidators(headSlot uint64) (map[types.PubkeyHe
 
 		validators, err := client.FetchValidators(headSlot)
 		if err != nil {
-			c.log.WithError(err).Error("failed to fetch validators")
+			log.WithError(err).Error("failed to fetch validators")
 			continue
 		}
 
@@ -148,14 +148,15 @@ func (c *MultiBeaconClient) FetchValidators(headSlot uint64) (map[types.PubkeyHe
 func (c *MultiBeaconClient) GetProposerDuties(epoch uint64) (*ProposerDutiesResponse, error) {
 	// return the first successful beacon node response
 	clients := c.beaconInstancesByLastResponse()
+	log := c.log.WithField("epoch", epoch)
 
 	for i, client := range clients {
-		log := c.log.WithField("uri", client.GetURI())
+		log := log.WithField("uri", client.GetURI())
 		log.Debug("fetching proposer duties")
 
 		duties, err := client.GetProposerDuties(epoch)
 		if err != nil {
-			c.log.WithError(err).Error("failed to get proposer duties")
+			log.WithError(err).Error("failed to get proposer duties")
 			continue
 		}
 
@@ -196,7 +197,7 @@ func (c *MultiBeaconClient) PublishBlock(block *types.SignedBeaconBlock) (code i
 		log.Debug("publishing block")
 
 		if code, err = client.PublishBlock(block); err != nil {
-			log.WithField("statusCode", code).WithError(err).Error("failed to publish block")
+			log.WithField("statusCode", code).WithError(err).Warn("failed to publish block")
 			continue
 		}
 
@@ -204,5 +205,6 @@ func (c *MultiBeaconClient) PublishBlock(block *types.SignedBeaconBlock) (code i
 		return code, nil
 	}
 
+	log.WithField("statusCode", code).WithError(err).Error("failed to publish block on any CL node")
 	return code, err
 }

@@ -61,19 +61,6 @@ var (
 	EthNetworkSepolia = "sepolia"
 	EthNetworkGoerli  = "goerli"
 	EthNetworkMainnet = "mainnet"
-
-	GenesisValidatorsRootGoerli = "0x043db0d9a83813551ee2f33450d23797757d430911a9320530ad8a0eabc43efb"
-	GenesisForkVersionGoerli    = "0x00001020"
-	BellatrixForkVersionGoerli  = "0x02001020"
-
-	GenesisValidatorsRootGoerliShadowFork6 = "0x6985063fa80a61a958ceeac5cf6125991ac297348e42542c85affbe9fb1c7328"
-	GenesisForkVersionGoerliShadowFork6    = "0x13001035"
-	BellatrixForkVersionGoerliShadowFork6  = "0x22001035"
-
-	// https://github.com/eth-clients/eth2-networks/blob/f3ccbe0cf5798d5cd23e4e6e7119aefa043c0935/shared/mainnet/config.yaml
-	GenesisValidatorsRootMainnet = "0x4b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe95"
-	GenesisForkVersionMainnet    = "0x00000000"
-	BellatrixForkVersionMainnet  = "0x02000000"
 )
 
 func NewEthNetworkDetails(networkName string) (ret *EthNetworkDetails, err error) {
@@ -97,13 +84,13 @@ func NewEthNetworkDetails(networkName string) (ret *EthNetworkDetails, err error
 		genesisValidatorsRoot = types.GenesisValidatorsRootSepolia
 		bellatrixForkVersion = types.BellatrixForkVersionSepolia
 	case EthNetworkGoerli:
-		genesisForkVersion = GenesisForkVersionGoerli
-		genesisValidatorsRoot = GenesisValidatorsRootGoerli
-		bellatrixForkVersion = BellatrixForkVersionGoerli
+		genesisForkVersion = types.GenesisForkVersionGoerli
+		genesisValidatorsRoot = types.GenesisValidatorsRootGoerli
+		bellatrixForkVersion = types.BellatrixForkVersionGoerli
 	case EthNetworkMainnet:
-		genesisForkVersion = GenesisForkVersionMainnet
-		genesisValidatorsRoot = GenesisValidatorsRootMainnet
-		bellatrixForkVersion = BellatrixForkVersionMainnet
+		genesisForkVersion = types.GenesisForkVersionMainnet
+		genesisValidatorsRoot = types.GenesisValidatorsRootMainnet
+		bellatrixForkVersion = types.BellatrixForkVersionMainnet
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnknownNetwork, networkName)
 	}
@@ -129,13 +116,13 @@ func NewEthNetworkDetails(networkName string) (ret *EthNetworkDetails, err error
 }
 
 type EpochSummary struct {
-	Epoch uint64 `json:"epoch"      db:"epoch"`
+	Epoch uint64 `json:"epoch" db:"epoch"`
 
-	// first and last slots are just derived from the epoch
+	// First and last slots are just derived from the epoch
 	SlotFirst uint64 `json:"slot_first" db:"slot_first"`
 	SlotLast  uint64 `json:"slot_last"  db:"slot_last"`
 
-	// registered are those that were actually used by the relay (some might be skipped if only one relay and it started in the middle of the epoch)
+	// Registered are those that were actually used by the relay (some might be skipped if only one relay and it started in the middle of the epoch)
 	SlotFirstProcessed uint64 `json:"slot_first_processed" db:"slot_first_processed"`
 	SlotLastProcessed  uint64 `json:"slot_last_processed"  db:"slot_last_processed"`
 
@@ -166,16 +153,16 @@ type SlotSummary struct {
 	Missed bool   `json:"missed" db:"missed"`
 
 	// General validator stats
-	ValidatorsKnownTotal        uint64 `json:"validators_known_total"                      db:"validators_known_total"`
-	ValidatorRegistrationsTotal uint64 `json:"validator_registrations_total"               db:"validator_registrations_total"`
+	ValidatorsKnownTotal        uint64 `json:"validators_known_total"        db:"validators_known_total"`
+	ValidatorRegistrationsTotal uint64 `json:"validator_registrations_total" db:"validator_registrations_total"`
 
 	// Slot proposer details
 	ProposerPubkey       string `json:"proposer_pubkey"        db:"proposer_pubkey"`
 	ProposerIsRegistered bool   `json:"proposer_is_registered" db:"proposer_is_registered"`
 
 	// The number of requests are the count of all requests to a specific path, even invalid ones
-	NumGetHeaderRequests  uint64 `json:"num_get_header_requests"         db:"num_get_header_requests"`
-	NumGetPayloadRequests uint64 `json:"num_get_payload_requests"        db:"num_get_payload_requests"`
+	NumGetHeaderRequests  uint64 `json:"num_get_header_requests"  db:"num_get_header_requests"`
+	NumGetPayloadRequests uint64 `json:"num_get_payload_requests" db:"num_get_payload_requests"`
 
 	// Responses to successful queries
 	NumHeaderSentOk       uint64 `json:"num_header_sent_ok"       db:"num_header_sent_ok"`
