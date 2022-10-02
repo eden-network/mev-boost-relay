@@ -42,6 +42,8 @@ type WebserverOpts struct {
 	DB                *database.DatabaseService
 	Log               *logrus.Entry
 	ShowConfigDetails bool
+	LinkBeaconchain   string
+	LinkEtherscan     string
 }
 
 type Webserver struct {
@@ -97,6 +99,8 @@ func NewWebserver(opts *WebserverOpts) (*Webserver, error) {
 		ValueLink:                   "",
 		ValueOrderIcon:              "",
 		ShowConfigDetails:           opts.ShowConfigDetails,
+		LinkBeaconchain:             opts.LinkBeaconchain,
+		LinkEtherscan:               opts.LinkEtherscan,
 	}
 
 	return server, nil
