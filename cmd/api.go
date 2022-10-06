@@ -3,7 +3,9 @@ package cmd
 import (
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/flashbots/go-boost-utils/bls"
@@ -12,7 +14,6 @@ import (
 	"github.com/flashbots/mev-boost-relay/database"
 	"github.com/flashbots/mev-boost-relay/datastore"
 	"github.com/flashbots/mev-boost-relay/services/api"
-	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
@@ -66,8 +67,7 @@ var apiCmd = &cobra.Command{
 			logLevel = "debug"
 		}
 
-		common.LogSetup(logJSON, logLevel)
-		log := logrus.WithField("service", "relay/api")
+		log := common.LogSetup(logJSON, logLevel).WithField("service", "relay/api")
 		if apiLogTag != "" {
 			log = log.WithField("tag", apiLogTag)
 		}
@@ -156,8 +156,24 @@ var apiCmd = &cobra.Command{
 			log.WithError(err).Fatal("failed to create service")
 		}
 
+		// Create a signal handler
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			sig := <-sigs
+			log.Infof("signal received: %s", sig)
+			err := srv.StopServer()
+			if err != nil {
+				log.WithError(err).Fatal("error stopping server")
+			}
+		}()
+
 		// Start the server
 		log.Infof("Webserver starting on %s ...", apiListenAddr)
-		log.Fatal(srv.StartServer())
+		err = srv.StartServer()
+		if err != nil {
+			log.WithError(err).Fatal("server error")
+		}
+		log.Info("bye")
 	},
 }

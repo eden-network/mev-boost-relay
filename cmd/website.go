@@ -8,17 +8,23 @@ import (
 	"github.com/flashbots/mev-boost-relay/database"
 	"github.com/flashbots/mev-boost-relay/datastore"
 	"github.com/flashbots/mev-boost-relay/services/website"
-	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
 var (
 	websiteDefaultListenAddr        = common.GetEnv("LISTEN_ADDR", "localhost:9060")
 	websiteDefaultShowConfigDetails = os.Getenv("SHOW_CONFIG_DETAILS") == "1"
+	websiteDefaultLinkBeaconchain   = common.GetEnv("LINK_BEACONCHAIN", "https://beaconcha.in")
+	websiteDefaultLinkEtherscan     = common.GetEnv("LINK_ETHERSCAN", "https://etherscan.io")
+	websiteDefaultRelayURL          = common.GetEnv("RELAY_URL", "")
 
 	websiteListenAddr        string
 	websitePubkeyOverride    string
 	websiteShowConfigDetails bool
+
+	websiteLinkBeaconchain string
+	websiteLinkEtherscan   string
+	websiteRelayURL        string
 )
 
 func init() {
@@ -33,6 +39,9 @@ func init() {
 
 	websiteCmd.Flags().StringVar(&network, "network", defaultNetwork, "Which network to use")
 	websiteCmd.Flags().BoolVar(&websiteShowConfigDetails, "show-config-details", websiteDefaultShowConfigDetails, "show config details")
+	websiteCmd.Flags().StringVar(&websiteLinkBeaconchain, "link-beaconchain", websiteDefaultLinkBeaconchain, "url for beaconcha.in")
+	websiteCmd.Flags().StringVar(&websiteLinkEtherscan, "link-etherscan", websiteDefaultLinkEtherscan, "url for etherscan")
+	websiteCmd.Flags().StringVar(&websiteRelayURL, "relay-url", websiteDefaultRelayURL, "full url for the relay (https://pubkey@host)")
 }
 
 var websiteCmd = &cobra.Command{
@@ -41,8 +50,7 @@ var websiteCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		var err error
 
-		common.LogSetup(logJSON, logLevel)
-		log := logrus.WithField("service", "relay/website")
+		log := common.LogSetup(logJSON, logLevel).WithField("service", "relay/website")
 		log.Infof("boost-relay %s", Version)
 
 		networkInfo, err := common.NewEthNetworkDetails(network)
@@ -89,6 +97,9 @@ var websiteCmd = &cobra.Command{
 			DB:                db,
 			Log:               log,
 			ShowConfigDetails: websiteShowConfigDetails,
+			LinkBeaconchain:   websiteLinkBeaconchain,
+			LinkEtherscan:     websiteLinkEtherscan,
+			RelayURL:          websiteRelayURL,
 		}
 
 		srv, err := website.NewWebserver(opts)

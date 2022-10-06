@@ -28,10 +28,13 @@ See also:
 
 - [Background](#background)
 - [Usage](#usage)
+- [Technical notes](#technical-notes)
 - [Maintainers](#maintainers)
 - [Contributing](#contributing)
 - [Security](#security)
 - [License](#license)
+
+---
 
 # Background
 
@@ -44,6 +47,8 @@ The mev-boost relay is a trusted mediator between block producers and block buil
 In the future, [proposer/builder separation](https://ethresear.ch/t/two-slot-proposer-builder-separation/10980) will be enshrined in the Ethereum protocol itself to further harden its trust model.
 
 Read more in [Why run mev-boost?](https://writings.flashbots.net/writings/why-run-mevboost/) and in the [Frequently Asked Questions](https://github.com/flashbots/mev-boost/wiki/Frequently-Asked-Questions).
+
+---
 
 # Usage
 
@@ -86,6 +91,7 @@ curl -X POST localhost:9062/eth/v1/builder/validators -d @testdata/valreg2.json
 redis-cli DEL boost-relay/sepolia:validators-registration boost-relay/sepolia:validators-registration-timestamp
 ```
 
+
 ### Environment variables
 
 * `DB_TABLE_PREFIX` - prefix to use for db tables (default uses `dev`)
@@ -96,11 +102,47 @@ redis-cli DEL boost-relay/sepolia:validators-registration boost-relay/sepolia:va
 * `DISABLE_LOWPRIO_BUILDERS` - reject block submissions by low-prio builders
 * `DISABLE_BID_MEMORY_CACHE` - disable bids to go through in-memory cache. forces to go through redis/db
 * `DISABLE_BID_REDIS_CACHE` - disable bids to go through redis cache. forces to go through memory/db
+* `NUM_ACTIVE_VALIDATOR_PROCESSORS` - proposer API - number of goroutines to listen to the active validators channel
+* `ACTIVE_VALIDATOR_HOURS` - number of hours to track active proposers in redis
+
 
 ### Updating the website
 
-You can generate a static version of the website with `go run scripts/website-staticgen/main.go` (update the values in `testdata/website-htmldata.json` accordingly).
+* Edit the HTML in `services/website/website.html`
+* Edit template values in `testdata/website-htmldata.json`
+* Generate a static version of the website with `go run scripts/website-staticgen/main.go`
 
+This builds a local copy of the template and saves it in `website-index.html`
+
+The website is using:
+* [PureCSS](https://purecss.io/)
+* [Font Awesome](https://fontawesome.com/docs) [icons](https://fontawesome.com/icons)
+
+---
+
+# Technical Notes
+
+### System startup sequence (housekeeper)
+
+First the housekeeper updates Redis with the main information for the API:
+1. Update known validators in Redis (source: beacon node)
+1. Update proposer duties in Redis (source: beacon node (duties) + Redis (validator registrations))
+1. Update validator registrations in Redis (source: database)
+1. Update builder status in Redis (source: database)
+
+Then the API can start and function.
+
+Aftwareds, there's important ongoing, regular housekeeper tasks:
+
+1. Update known validators and proposer duties in Redis
+2. Update active validators in database (source: Redis)
+
+
+### Tradeoffs
+
+- Validator registrations in are only saved to the database if `feeRecipient` changes. If a registration has a newer timestamp but same `feeRecipient` it is not saved, to avoid filling up the database with unnecessary data. (Some CL clients create a new validator registration every epoch, not just if the `feeRecipient` changes, as was the original idea).
+
+---
 
 # Maintainers
 

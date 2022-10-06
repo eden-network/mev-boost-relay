@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en" class="no-js">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Type" content="text/html">
+    <meta name="viewport" content="width=device-width,initial-scale=1;">
+
+    <title>Eden Relay - {{ .Network | caseIt }}</title>
+
+    <meta name="description" content="Eden Relay enables Ethereum proof-of-stake validators access to blocks with maximal extractable value">
+    <link data-react-helmet="true" rel="shortcut icon"
+        href="https://storage.googleapis.com/eden_brand/img/favicon-32x32.png">
+
+    <meta property="og:title" content="Eden Relay" />
+    <meta property="og:description" content="Eden Relay enables Ethereum proof-of-stake validators access to blocks with maximal extractable value" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Eden Relay" />
+    <meta property="og:image" content="https://storage.googleapis.com/eden_brand/img/logo.png" />
+    <meta property="og:image:url" content="https://storage.googleapis.com/eden_brand/img/logo.png" />
+    <meta property="og:image:alt" content="Eden logo" />
+
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="Eden Relay" />
+    <meta property="twitter:description" content="Eden Relay enables Ethereum proof-of-stake validators access to blocks with maximal extractable value" />
+    <meta property="twitter:image" content="https://storage.googleapis.com/eden_brand/img/logo.png" />
+
+    <link rel="stylesheet"
+        data-href="https://fonts.googleapis.com/css2?family=Titillium+Web:wght@300;400;600;700&amp;display=swap" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
+    <link rel="stylesheet" href="https://cdn.rawgit.com/Arch-Matt/M-grid/ff2ee025/m-grid-min.1.0.0.css">
+
+
+    <style type="text/css">
+        :root {
+            --green: #caff00;
+            --lightblue: #2b305a;
+            --darkblue: #171c47;
+        }
+
+        body {
+            padding: 10px 15px;
+            background: var(--lightblue);
+            color: #fff;
+            font-family: 'Titillium Web', serif;
+            margin: 0;
+        }
+
+        pre {
+            text-align: left;
+        }
+
+        hr {
+            border-top: 1px solid #e5e5e5;
+            margin: 40px 0;
+        }
+
+        tt {
+            font-size: 1.2em;
+            background: var(--lightblue);
+        }
+
+        li {
+            margin: 2px 0px;
+        }
+
+        .pure-table thead {
+            background-color: var(--lightblue);
+        }
+
+        .pure-table tr:hover td {
+            background: var(--lightblue) !important;
+        }
+
+        .pure-table {
+            width: 100%;
+            min-width: 600px;
+        }
+
+
+
+        .table-holder {
+            width: 100%;
+            overflow-x: auto;
+        }
+
+        .text-green {
+            color: var(--green);
+        }
+
+        .m-grid {
+            margin: 0;
+        }
+
+
+        ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        .stat-block {
+            margin: 0;
+            list-style: none;
+            display: inline-table;
+            table-layout: fixed;
+            padding: 0;
+            background: var(--green);
+            color: var(--darkblue);
+            font-weight: 400;
+            border-radius: 10px;
+            font-size: 1.125rem;
+        }
+
+        .stat-block li {
+            display: table-cell;
+            padding: 15px 30px;
+            border-right: 2px solid var(--lightblue);
+        }
+
+        .stat-block li:last-child {
+            border: none;
+        }
+
+        .stat-block span {
+            display: block;
+            margin: 0 auto;
+            font-weight: 700;
+            font-size: 3rem;
+        }
+
+        input[type="text"] {
+            border: none;
+            background: var(--lightblue);
+            padding: 5px 10px;
+            color: #fff;
+            width: 100%;
+            text-align: center;
+            margin-top: -10px;
+            display: block;
+        }
+
+        .box {
+            background: var(--darkblue);
+            border-radius: 10px;
+            padding: 15px 30px 30px 30px;
+            width: 100%;
+            height: 100%;
+        }
+
+        .config-table {
+            width: 100%;
+        }
+
+        a:link {
+            color: var(--green);
+            text-decoration: none;
+        }
+
+        a:visited {
+            color: var(--green);
+            text-decoration: none;
+        }
+
+        a:hover {
+            color: #fff;
+            text-decoration: none;
+        }
+
+        a:active {
+            color: #fff;
+            text-decoration: none;
+        }
+
+        a.button {
+            background: var(--green);
+            color: var(--darkblue);
+            display: inline-block;
+            margin: 7px 7px 7px 7px;
+            padding: 15px 30px;
+            width: auto;
+            border-radius: 5px;
+            text-decoration: none;
+            font-weight: 700;
+        }
+
+        a.button:hover {
+            background: #fff;
+        }
+
+        h1 {
+            font-size: 3rem;
+        }
+
+        h2 {
+            margin-top: 0;
+        }
+
+        h3 {
+            font-size: 1.125rem;
+        }
+
+        .logobar {
+            width: calc(100% + 30px);
+            margin-top: -10px;
+            margin-left: -15px;
+            background: var(--darkblue);
+            padding: 15px
+        }
+
+        .logo {
+            height: 30px;
+        }
+
+        #relay-url {
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke-width='1.5' stroke='white' class='w-6 h-6 copy-icon' onclick='copyRelayURLToClipboard()'%3E%3Ctitle%3ECopy Relay URL to clipboard%3C/title%3E%3Cpath stroke-linecap=' round' stroke-linejoin='round' d='M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 01-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 011.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 00-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 01-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 00-3.375-3.375h-1.5a1.125 1.125 0 01-1.125-1.125v-1.5a3.375 3.375 0 00-3.375-3.375H9.75'%3E%3C/path%3E%3C/svg%3E");
+            background-size: 18px 18px;
+            background-repeat: no-repeat;
+            background-position: right 10px bottom 50%;
+        }
+
+        #relay-url:hover {
+            cursor: pointer;
+        }
+
+        @media(max-width: 768px) {
+
+            .stat-block,
+            .stat-block li {
+                display: block;
+                width: 100%;
+            }
+
+            .stat-block li {
+                border: none;
+                border-bottom: 2px solid var(--darkblue);
+            }
+
+            .stat-block li:last-child {
+                border: none;
+            }
+
+            input[type="text"] {
+                text-align: left;
+            }
+        }
+    </style>
+    <script>
+        function copyRelayURLToClipboard() {
+            var copyText = document.getElementById("relay-url");
+            copyText.select();
+            copyText.setSelectionRange(0, 99999); // For mobile devices
+            navigator.clipboard.writeText(copyText.value);
+        }
+    </script>
+</head>
+
+<body>
+
+    <div class="logobar">
+        <div class="m-container-1600">
+            <a href="https://edennetwork.io"><img class="logo"
+                    src="https://storage.googleapis.com/eden_brand/img/logo.svg"></a>
+        </div>
+    </div>
+
+
+    <div class="m-container-1600 text-center">
+        <h1>
+            Eden Relay - <span class="text-green">{{ .Network | caseIt }}</span>
+        </h1>
+
+
+
+        <div class="m-section-15">
+            <div class="m-grid m-grid-gap-30">
+                <div class="m-xl-12 m-lg-7 m-md-12 m-sm-12">
+                    <div class="box">
+                        <h3>
+                            Configuration
+                        </h3>
+
+                        {{if .RelayURL}}
+                            <p>Relay URL:</p>
+                            <input type="text" id="relay-url" value="{{ .RelayURL }}" onclick="copyRelayURLToClipboard()">
+                        {{end}}
+
+                        <p>Relay Pubkey:</p>
+                        <input type="text" value="{{ .RelayPubkey }}">
+
+                        <p>Bellatrix fork version:</p>
+                        <input type="text" value="{{ .BellatrixForkVersion }}">
+
+                        <p>Genesis fork version:</p>
+                        <input type="text" value="{{ .GenesisForkVersion }}">
+
+                        <p>Genesis validators root:</p>
+                        <input type="text" value="{{ .GenesisValidatorsRoot }}">
+
+                        <p>Builder signing domain:</p>
+                        <input type="text" value="{{ .BuilderSigningDomain }}">
+
+                        <p>Beacon proposer signing domain:</p>
+                        <input type="text" value="{{ .BeaconProposerSigningDomain }}">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+
+        <div class="m-section-30">
+            <h2>
+                Stats
+            </h2>
+
+            <ul class="stat-block">
+                <li><span>{{ .ValidatorsTotal | prettyInt }}</span>Validators total</li>
+                <li><span>{{ .ValidatorsRegistered | prettyInt }}</span>Validators registered</li>
+                <li><span>{{ .ValidatorsActive | prettyInt }}</span>Validators active</li>
+                <li><span>{{ .HeadSlot | prettyInt }}</span>Latest slot</li>
+            </ul>
+        </div>
+
+
+
+
+        <div class="m-section-15">
+            <div class="box">
+                <h2>
+                    Recently Delivered Payloads
+                </h2>
+
+                <div class="table-holder">
+                    <table class="pure-table pure-table-horizontal pure-table-striped">
+                        <thead>
+                            <tr>
+                                <th>Epoch</th>
+                                <th>Slot</th>
+                                <th>Block number</th>
+                                <th>
+                                    Value (ETH{{.ValueOrderIcon}})
+        
+                                    <a href="{{.ValueLink}}">
+                                        <svg id="icon-sort-default" style="float:right; width:16px;" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 7.5L7.5 3m0 0L12 7.5M7.5 3v13.5m13.5 0L16.5 21m0 0L12 16.5m4.5 4.5V7.5" />
+                                        </svg>
+                                    </a>
+                                </th>
+                                <th>Num tx</th>
+                                <th>Block hash</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {{$linkBeaconchain := .LinkBeaconchain}}
+                            {{$linkEtherscan := .LinkEtherscan}}
+                            {{ range .Payloads }}
+                            <tr>
+                                <td>{{.Epoch | prettyInt}}</td>
+                                <td><a
+                                        href="/relay/v1/data/bidtraces/proposer_payload_delivered?slot={{.Slot}}">{{.Slot | prettyInt}}</a>
+                                </td>
+                                <td>{{.BlockNumber | prettyInt}}</td>
+                                <td>{{.Value | weiToEth}}</td>
+                                <td>{{.NumTx}}</td>
+                                <td>{{.BlockHash}}</td>
+                                <td>
+                                    <div class="icons-container">
+                                        {{ if ne $linkBeaconchain "" }}
+                                        <a class="img-beaconchain" href="{{$linkBeaconchain}}/slot/{{.Slot}}" target="_blank" alt="View slot in beaconcha.in" title="View slot in beaconcha.in"></a>
+                                        &nbsp;
+                                        {{ end }}
+                                        {{ if ne $linkEtherscan "" }}
+                                        <a href="{{$linkEtherscan}}/block/{{.BlockNumber}}" target="_blank"><img src="https://etherscan.io/images/favicon3.ico" width="18" height="18" alt="View block on Etherscan" title="View block on Etherscan" /></a>
+                                        {{ end }}
+                                    </div>
+                                </td>
+                            </tr>
+                            {{ end }}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+
+
+        <div class="m-section-15">
+            <h2>
+                {{.NumPayloadsDelivered | prettyInt}} payloads delivered</p>
+            </h2>
+            <a class="button" target="_blank" href="/relay/v1/data/bidtraces/proposer_payload_delivered?limit=10">Data
+                API</a> <a class="button" target="_blank" href="https://docs.edennetwork.io">Docs</a></p>
+        </div>
+    </div>
+</body>
+</html>

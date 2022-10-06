@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"github.com/NYTimes/gziphandler"
 	"github.com/flashbots/go-boost-utils/bls"
 	"github.com/flashbots/go-boost-utils/types"
+	"github.com/flashbots/go-utils/cli"
 	"github.com/flashbots/go-utils/httplogger"
 	"github.com/flashbots/mev-boost-relay/beaconclient"
 	"github.com/flashbots/mev-boost-relay/common"
@@ -55,6 +57,10 @@ var (
 
 	// Internal API
 	pathInternalBuilderStatus = "/internal/v1/builder/{pubkey:0x[a-fA-F0-9]+}"
+
+	// number of goroutines to save active validator
+	numActiveValidatorProcessors = cli.GetEnvInt("NUM_ACTIVE_VALIDATOR_PROCESSORS", 10)
+	numValidatorRegProcessors    = cli.GetEnvInt("NUM_VALIDATOR_REG_PROCESSORS", 10)
 )
 
 // RelayAPIOpts contains the options for a relay
@@ -102,10 +108,14 @@ type RelayAPI struct {
 
 	proposerDutiesLock       sync.RWMutex
 	proposerDutiesResponse   []types.BuilderGetValidatorsResponseEntry
+	proposerDutiesMap        map[uint64]*types.RegisterValidatorRequestMessage
 	proposerDutiesSlot       uint64
 	isUpdatingProposerDuties uberatomic.Bool
 
 	blockSimRateLimiter *BlockSimulationRateLimiter
+
+	activeValidatorC chan types.PubkeyHex
+	validatorRegC    chan types.SignedValidatorRegistration
 
 	// Feature flags
 	ffForceGetHeader204      bool
@@ -166,6 +176,9 @@ func NewRelayAPI(opts RelayAPIOpts) (api *RelayAPI, err error) {
 		db:                     opts.DB,
 		proposerDutiesResponse: []types.BuilderGetValidatorsResponseEntry{},
 		blockSimRateLimiter:    NewBlockSimulationRateLimiter(opts.BlockSimURL),
+
+		activeValidatorC: make(chan types.PubkeyHex, 450_000),
+		validatorRegC:    make(chan types.SignedValidatorRegistration, 450_000),
 	}
 
 	if os.Getenv("FORCE_GET_HEADER_204") == "1" {
@@ -251,6 +264,18 @@ func (api *RelayAPI) StartServer() (err error) {
 	// Update list of known validators, and start refresh loop
 	go api.startKnownValidatorUpdates()
 
+	// Start the active validator processor
+	api.log.Infof("starting %d active validator processors", numActiveValidatorProcessors)
+	for i := 0; i < numActiveValidatorProcessors; i++ {
+		go api.startActiveValidatorProcessor()
+	}
+
+	// Start the validator registration db-save processor
+	api.log.Infof("starting %d validator registration processors", numValidatorRegProcessors)
+	for i := 0; i < numValidatorRegProcessors; i++ {
+		go api.startValidatorRegistrationDBProcessor()
+	}
+
 	// Process current slot
 	api.processNewSlot(bestSyncStatus.HeadSlot)
 
@@ -288,6 +313,43 @@ func (api *RelayAPI) StartServer() (err error) {
 		return nil
 	}
 	return err
+}
+
+// StopServer disables sending any bids on getHeader calls, waits a few seconds to catch any remaining getPayload call, and then shuts down the webserver
+func (api *RelayAPI) StopServer() (err error) {
+	api.log.Info("Stopping server...")
+
+	if api.opts.ProposerAPI {
+		// stop sending bids
+		api.ffForceGetHeader204 = true
+		api.log.Info("Disabled sending bids, waiting a few seconds...")
+
+		// wait a few seconds, for any pending getPayload call to complete
+		time.Sleep(5 * time.Second)
+	}
+
+	// shutdown
+	return api.srv.Shutdown(context.Background())
+}
+
+// startActiveValidatorProcessor keeps listening on the channel and saving active validators to redis
+func (api *RelayAPI) startActiveValidatorProcessor() {
+	for pubkey := range api.activeValidatorC {
+		err := api.redis.SetActiveValidator(pubkey)
+		if err != nil {
+			api.log.WithError(err).Infof("error setting active validator")
+		}
+	}
+}
+
+// startActiveValidatorProcessor keeps listening on the channel and saving active validators to redis
+func (api *RelayAPI) startValidatorRegistrationDBProcessor() {
+	for valReg := range api.validatorRegC {
+		err := api.datastore.SaveValidatorRegistration(valReg)
+		if err != nil {
+			api.log.WithError(err).WithField("proposerPubkey", valReg.Message.Pubkey.String()).Infof("error saving validator registration")
+		}
+	}
 }
 
 func (api *RelayAPI) processNewSlot(headSlot uint64) {
@@ -328,10 +390,15 @@ func (api *RelayAPI) updateProposerDuties(headSlot uint64) {
 
 	// Get duties from mem
 	duties, err := api.redis.GetProposerDuties()
+	dutiesMap := make(map[uint64]*types.RegisterValidatorRequestMessage)
+	for _, duty := range duties {
+		dutiesMap[duty.Slot] = duty.Entry.Message
+	}
 
 	if err == nil {
 		api.proposerDutiesLock.Lock()
 		api.proposerDutiesResponse = duties
+		api.proposerDutiesMap = dutiesMap
 		api.proposerDutiesSlot = headSlot
 		api.proposerDutiesLock.Unlock()
 
@@ -453,6 +520,13 @@ func (api *RelayAPI) handleRegisterValidator(w http.ResponseWriter, req *http.Re
 			regLog.WithError(err).Infof("error getting last registration timestamp")
 		}
 
+		// Track active validators here
+		select {
+		case api.activeValidatorC <- pubkey:
+		default:
+			regLog.Error("active validator channel full")
+		}
+
 		// Do nothing if the registration is already the latest
 		if prevTimestamp >= registration.Message.Timestamp {
 			continue
@@ -470,13 +544,12 @@ func (api *RelayAPI) handleRegisterValidator(w http.ResponseWriter, req *http.Re
 			api.RespondError(w, http.StatusBadRequest, fmt.Sprintf("failed to verify validator signature for %s", registration.Message.Pubkey.String()))
 			return
 		} else {
-			// Save
-			go func(reg types.SignedValidatorRegistration) {
-				err := api.datastore.SetValidatorRegistration(reg)
-				if err != nil {
-					regLog.WithError(err).Error("Failed to set validator registration")
-				}
-			}(registration)
+			// Save to database
+			select {
+			case api.validatorRegC <- registration:
+			default:
+				regLog.Error("validator registration channel full")
+			}
 		}
 	}
 
@@ -688,6 +761,20 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 		log.WithError(err).Error("could not get block builder status")
 	}
 
+	// ensure correct feeRecipient is used
+	api.proposerDutiesLock.RLock()
+	slotDuty := api.proposerDutiesMap[payload.Message.Slot]
+	api.proposerDutiesLock.RUnlock()
+	if slotDuty == nil {
+		log.Warn("could not find slot duty")
+		api.RespondError(w, http.StatusBadRequest, "could not find slot duty")
+		return
+	} else if slotDuty.FeeRecipient != payload.Message.ProposerFeeRecipient {
+		log.Warn("fee recipient does not match")
+		api.RespondError(w, http.StatusBadRequest, "fee recipient does not match")
+		return
+	}
+
 	if builderIsBlacklisted {
 		log.Info("builder is blacklisted")
 		time.Sleep(200 * time.Millisecond)
@@ -866,14 +953,8 @@ func (api *RelayAPI) handleInternalBuilderStatus(w http.ResponseWriter, req *htt
 			"isBlacklisted": isBlacklisted,
 		}).Info("updating builder status")
 
-		var status datastore.BlockBuilderStatus
-		if isBlacklisted {
-			status = datastore.RedisBlockBuilderStatusBlacklisted
-		} else if isHighPrio {
-			status = datastore.RedisBlockBuilderStatusHighPrio
-		}
-
-		err := api.redis.SetBlockBuilderStatus(builderPubkey, status)
+		newStatus := datastore.MakeBlockBuilderStatus(isHighPrio, isBlacklisted)
+		err := api.redis.SetBlockBuilderStatus(builderPubkey, newStatus)
 		if err != nil {
 			api.log.WithError(err).Error("could not set block builder status in redis")
 		}
@@ -883,7 +964,7 @@ func (api *RelayAPI) handleInternalBuilderStatus(w http.ResponseWriter, req *htt
 			api.log.WithError(err).Error("could not set block builder status in database")
 		}
 
-		api.RespondOK(w, struct{ newStatus string }{newStatus: string(status)})
+		api.RespondOK(w, struct{ newStatus string }{newStatus: string(newStatus)})
 	}
 }
 
@@ -1105,17 +1186,23 @@ func (api *RelayAPI) handleDataValidatorRegistration(w http.ResponseWriter, req 
 		return
 	}
 
-	registration, err := api.redis.GetValidatorRegistration(types.NewPubkeyHex(pkStr))
+	registrationEntry, err := api.db.GetValidatorRegistration(pkStr)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			api.RespondError(w, http.StatusBadRequest, "no registration found for validator "+pkStr)
+			return
+		}
 		api.log.WithError(err).Error("error getting validator registration")
 		api.RespondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	if registration == nil {
-		api.RespondError(w, http.StatusBadRequest, "no registration found for validator "+pkStr)
+	signedRegistration, err := registrationEntry.ToSignedValidatorRegistration()
+	if err != nil {
+		api.log.WithError(err).Error("error converting registration entry to signed validator registration")
+		api.RespondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	api.RespondOK(w, registration)
+	api.RespondOK(w, signedRegistration)
 }

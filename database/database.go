@@ -14,17 +14,21 @@ import (
 )
 
 type IDatabaseService interface {
-	SaveValidatorRegistration(registration types.SignedValidatorRegistration) error
-	SaveBuilderBlockSubmission(payload *types.BuilderSubmitBlockRequest, simError error, isMostProfitable bool) (entry *BuilderBlockSubmissionEntry, err error)
-	SaveDeliveredPayload(slot uint64, proposerPubkey types.PubkeyHex, blockHash types.Hash, signedBlindedBeaconBlock *types.SignedBlindedBeaconBlock) error
+	NumRegisteredValidators() (count uint64, err error)
+	SaveValidatorRegistration(entry ValidatorRegistrationEntry) error
+	GetLatestValidatorRegistrations(timestampOnly bool) ([]*ValidatorRegistrationEntry, error)
+	GetValidatorRegistration(pubkey string) (*ValidatorRegistrationEntry, error)
+	GetValidatorRegistrationsForPubkeys(pubkeys []string) ([]*ValidatorRegistrationEntry, error)
 
+	SaveBuilderBlockSubmission(payload *types.BuilderSubmitBlockRequest, simError error, isMostProfitable bool) (entry *BuilderBlockSubmissionEntry, err error)
 	GetBlockSubmissionEntry(slot uint64, proposerPubkey, blockHash string) (entry *BuilderBlockSubmissionEntry, err error)
+	GetBuilderSubmissions(filters GetBuilderSubmissionsFilters) ([]*BuilderBlockSubmissionEntry, error)
 	GetExecutionPayloadEntryByID(executionPayloadID int64) (entry *ExecutionPayloadEntry, err error)
 	GetExecutionPayloadEntryBySlotPkHash(slot uint64, proposerPubkey, blockHash string) (entry *ExecutionPayloadEntry, err error)
 
+	SaveDeliveredPayload(slot uint64, proposerPubkey types.PubkeyHex, blockHash types.Hash, signedBlindedBeaconBlock *types.SignedBlindedBeaconBlock) error
 	GetRecentDeliveredPayloads(filters GetPayloadsFilters) ([]*DeliveredPayloadEntry, error)
 	GetNumDeliveredPayloads() (uint64, error)
-	GetBuilderSubmissions(filters GetBuilderSubmissionsFilters) ([]*BuilderBlockSubmissionEntry, error)
 
 	GetBlockBuilders() ([]*BlockBuilderEntry, error)
 	GetBlockBuilderByPubkey(pubkey string) (*BlockBuilderEntry, error)
@@ -67,21 +71,69 @@ func (s *DatabaseService) Close() error {
 	return s.DB.Close()
 }
 
-func (s *DatabaseService) SaveValidatorRegistration(registration types.SignedValidatorRegistration) error {
-	entry := ValidatorRegistrationEntry{
-		Pubkey:       registration.Message.Pubkey.String(),
-		FeeRecipient: registration.Message.FeeRecipient.String(),
-		Timestamp:    registration.Message.Timestamp,
-		GasLimit:     registration.Message.GasLimit,
-		Signature:    registration.Signature.String(),
-	}
+// NumRegisteredValidators returns the number of unique pubkeys that have registered
+func (s *DatabaseService) NumRegisteredValidators() (count uint64, err error) {
+	query := `SELECT COUNT(*) FROM (SELECT DISTINCT pubkey FROM ` + TableValidatorRegistration + `) AS temp;`
+	row := s.DB.QueryRow(query)
+	err = row.Scan(&count)
+	return count, err
+}
 
-	query := `INSERT INTO ` + TableValidatorRegistration + `
-		(pubkey, fee_recipient, timestamp, gas_limit, signature) VALUES
-		(:pubkey, :fee_recipient, :timestamp, :gas_limit, :signature)
-		ON CONFLICT (pubkey, fee_recipient) DO NOTHING;`
+func (s *DatabaseService) NumValidatorRegistrationRows() (count uint64, err error) {
+	query := `SELECT COUNT(*) FROM ` + TableValidatorRegistration + `;`
+	row := s.DB.QueryRow(query)
+	err = row.Scan(&count)
+	return count, err
+}
+
+func (s *DatabaseService) SaveValidatorRegistration(entry ValidatorRegistrationEntry) error {
+	query := `WITH latest_registration AS (
+		SELECT DISTINCT ON (pubkey) pubkey, fee_recipient, timestamp, gas_limit, signature FROM ` + TableValidatorRegistration + ` WHERE pubkey=:pubkey ORDER BY pubkey, timestamp DESC limit 1
+	)
+	INSERT INTO ` + TableValidatorRegistration + ` (pubkey, fee_recipient, timestamp, gas_limit, signature)
+	SELECT :pubkey, :fee_recipient, :timestamp, :gas_limit, :signature
+	WHERE NOT EXISTS (
+		SELECT 1 from latest_registration WHERE pubkey=:pubkey AND :timestamp <= latest_registration.timestamp OR (:fee_recipient = latest_registration.fee_recipient AND :gas_limit = latest_registration.gas_limit)
+	);`
 	_, err := s.DB.NamedExec(query, entry)
 	return err
+}
+
+func (s *DatabaseService) GetValidatorRegistration(pubkey string) (*ValidatorRegistrationEntry, error) {
+	query := `SELECT DISTINCT ON (pubkey) pubkey, fee_recipient, timestamp, gas_limit, signature
+		FROM ` + TableValidatorRegistration + `
+		WHERE pubkey=$1
+		ORDER BY pubkey, timestamp DESC;`
+	entry := &ValidatorRegistrationEntry{}
+	err := s.DB.Get(entry, query, pubkey)
+	return entry, err
+}
+
+func (s *DatabaseService) GetValidatorRegistrationsForPubkeys(pubkeys []string) (entries []*ValidatorRegistrationEntry, err error) {
+	query := `SELECT DISTINCT ON (pubkey) pubkey, fee_recipient, timestamp, gas_limit, signature
+		FROM ` + TableValidatorRegistration + `
+		WHERE pubkey IN (?)
+		ORDER BY pubkey, timestamp DESC;`
+
+	q, args, err := sqlx.In(query, pubkeys)
+	if err != nil {
+		return nil, err
+	}
+	err = s.DB.Select(&entries, s.DB.Rebind(q), args...)
+	return entries, err
+}
+
+func (s *DatabaseService) GetLatestValidatorRegistrations(timestampOnly bool) ([]*ValidatorRegistrationEntry, error) {
+	// query details: https://stackoverflow.com/questions/3800551/select-first-row-in-each-group-by-group/7630564#7630564
+	query := `SELECT DISTINCT ON (pubkey) pubkey, fee_recipient, timestamp, gas_limit, signature`
+	if timestampOnly {
+		query = `SELECT DISTINCT ON (pubkey) pubkey, timestamp`
+	}
+	query += ` FROM ` + TableValidatorRegistration + ` ORDER BY pubkey, timestamp DESC;`
+
+	var registrations []*ValidatorRegistrationEntry
+	err := s.DB.Select(&registrations, query)
+	return registrations, err
 }
 
 func (s *DatabaseService) SaveBuilderBlockSubmission(payload *types.BuilderSubmitBlockRequest, simError error, isMostProfitable bool) (entry *BuilderBlockSubmissionEntry, err error) {
