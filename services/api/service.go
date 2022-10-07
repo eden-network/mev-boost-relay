@@ -111,6 +111,8 @@ type RelayAPI struct {
 	ffForceGetHeader204      bool
 	ffDisableBlockPublishing bool
 	ffDisableLowPrioBuilders bool
+
+	builderBlockCompareLock sync.Mutex
 }
 
 // NewRelayAPI creates a new service. if builders is nil, allow any builder
@@ -776,9 +778,22 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 	// 	}).Info("block validation successful")
 	// }
 
+	// Try to do as much work as possible before locking
+
+	// Prepare the response data
+	signedBuilderBid, err := BuilderSubmitBlockRequestToSignedBuilderBid(payload, api.blsSk, api.publicKey, api.opts.EthNetDetails.DomainBuilder)
+	if err != nil {
+		log.WithError(err).Error("could not sign builder bid")
+		api.RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	api.builderBlockCompareLock.Lock()
+
 	// Check if there's already a bid
 	prevBid, err := api.datastore.GetGetHeaderResponse(payload.Message.Slot, payload.Message.ParentHash.String(), payload.Message.ProposerPubkey.String())
 	if err != nil {
+		api.builderBlockCompareLock.Unlock()
 		log.WithError(err).Error("error getting previous bid")
 		api.RespondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -787,16 +802,9 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 	// Only proceed if this bid is higher than previous one
 	isMostProfitableBlock = prevBid == nil || payload.Message.Value.Cmp(&prevBid.Data.Message.Value) == 1
 	if !isMostProfitableBlock {
+		api.builderBlockCompareLock.Unlock()
 		log.Debug("block submission with same or lower value")
 		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	// Prepare the response data
-	signedBuilderBid, err := BuilderSubmitBlockRequestToSignedBuilderBid(payload, api.blsSk, api.publicKey, api.opts.EthNetDetails.DomainBuilder)
-	if err != nil {
-		log.WithError(err).Error("could not sign builder bid")
-		api.RespondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -817,10 +825,13 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 
 	err = api.datastore.SaveBlockSubmission(&signedBidTrace, &getHeaderResponse, &getPayloadResponse)
 	if err != nil {
+		api.builderBlockCompareLock.Unlock()
 		log.WithError(err).Error("could not save bid and block")
 		api.RespondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	api.builderBlockCompareLock.Unlock()
 
 	log.WithFields(logrus.Fields{
 		"proposerPubkey":   payload.Message.ProposerPubkey.String(),
