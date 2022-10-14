@@ -6,8 +6,8 @@ require (
 	github.com/alicebob/miniredis/v2 v2.23.0
 	github.com/ethereum/go-ethereum v1.10.23
 	github.com/flashbots/go-boost-utils v1.0.0
-	github.com/flashbots/go-utils v0.4.7
-	github.com/go-redis/redis/v9 v9.0.0-beta.2
+	github.com/flashbots/go-utils v0.4.5
+	github.com/go-redis/redis/v9 v9.0.0-rc.1
 	github.com/gorilla/mux v1.8.0
 	github.com/jinzhu/copier v0.3.5
 	github.com/jmoiron/sqlx v1.3.5
@@ -52,8 +52,8 @@ require (
 	github.com/tklauser/numcpus v0.2.2 // indirect
 	github.com/yuin/gopher-lua v0.0.0-20210529063254-f4c35e4016d9 // indirect
 	golang.org/x/crypto v0.0.0-20220622213112-05595931fe9d // indirect
-	golang.org/x/net v0.0.0-20220708220712-1185a9018129 // indirect
-	golang.org/x/sys v0.0.0-20220715151400-c0bba94af5f8 // indirect
+	golang.org/x/net v0.0.0-20220722155237-a158d28d115b // indirect
+	golang.org/x/sys v0.0.0-20220722155257-8c9f86f7a55f // indirect
 	gopkg.in/cenkalti/backoff.v1 v1.1.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
