@@ -1,6 +1,9 @@
 package database
 
-import "github.com/flashbots/go-boost-utils/types"
+import (
+	"github.com/flashbots/go-boost-utils/types"
+	"github.com/flashbots/mev-boost-relay/common"
+)
 
 type MockDB struct{}
 
@@ -36,11 +39,23 @@ func (db MockDB) GetExecutionPayloadEntryBySlotPkHash(slot uint64, proposerPubke
 	return nil, nil
 }
 
+func (db MockDB) GetExecutionPayloads(idFirst, idLast uint64) (entries []*ExecutionPayloadEntry, err error) {
+	return nil, nil
+}
+
+func (db MockDB) DeleteExecutionPayloads(idFirst, idLast uint64) error {
+	return nil
+}
+
 func (db MockDB) GetBlockSubmissionEntry(slot uint64, proposerPubkey, blockHash string) (entry *BuilderBlockSubmissionEntry, err error) {
 	return nil, nil
 }
 
 func (db MockDB) GetRecentDeliveredPayloads(filters GetPayloadsFilters) ([]*DeliveredPayloadEntry, error) {
+	return nil, nil
+}
+
+func (db MockDB) GetDeliveredPayloads(idFirst, idLast uint64) (entries []*DeliveredPayloadEntry, err error) {
 	return nil, nil
 }
 
@@ -52,7 +67,7 @@ func (db MockDB) GetBuilderSubmissions(filters GetBuilderSubmissionsFilters) ([]
 	return nil, nil
 }
 
-func (db MockDB) SaveDeliveredPayload(slot uint64, proposerPubkey types.PubkeyHex, blockHash types.Hash, signedBlindedBeaconBlock *types.SignedBlindedBeaconBlock) error {
+func (db MockDB) SaveDeliveredPayload(bidTrace *common.BidTraceV2, signedBlindedBeaconBlock *types.SignedBlindedBeaconBlock) error {
 	return nil
 }
 

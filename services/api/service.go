@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/NYTimes/gziphandler"
+	"github.com/buger/jsonparser"
 	"github.com/flashbots/go-boost-utils/bls"
 	"github.com/flashbots/go-boost-utils/types"
 	"github.com/flashbots/go-utils/cli"
@@ -61,6 +63,7 @@ var (
 	// number of goroutines to save active validator
 	numActiveValidatorProcessors = cli.GetEnvInt("NUM_ACTIVE_VALIDATOR_PROCESSORS", 10)
 	numValidatorRegProcessors    = cli.GetEnvInt("NUM_VALIDATOR_REG_PROCESSORS", 10)
+	timeoutGetPayloadRetryMs     = cli.GetEnvInt("GETPAYLOAD_RETRY_TIMEOUT_MS", 100)
 )
 
 // RelayAPIOpts contains the options for a relay
@@ -116,6 +119,9 @@ type RelayAPI struct {
 
 	activeValidatorC chan types.PubkeyHex
 	validatorRegC    chan types.SignedValidatorRegistration
+
+	// used to wait on any active getPayload calls on shutdown
+	getPayloadCallsInFlight sync.WaitGroup
 
 	// Feature flags
 	ffForceGetHeader204      bool
@@ -258,22 +264,28 @@ func (api *RelayAPI) StartServer() (err error) {
 		return err
 	}
 
-	// Get current proposer duties
-	api.updateProposerDuties(bestSyncStatus.HeadSlot)
-
-	// Update list of known validators, and start refresh loop
-	go api.startKnownValidatorUpdates()
-
-	// Start the active validator processor
-	api.log.Infof("starting %d active validator processors", numActiveValidatorProcessors)
-	for i := 0; i < numActiveValidatorProcessors; i++ {
-		go api.startActiveValidatorProcessor()
+	// start things for the block-builder API
+	if api.opts.BlockBuilderAPI {
+		// Get current proposer duties blocking before starting, to have them ready
+		api.updateProposerDuties(bestSyncStatus.HeadSlot)
 	}
 
-	// Start the validator registration db-save processor
-	api.log.Infof("starting %d validator registration processors", numValidatorRegProcessors)
-	for i := 0; i < numValidatorRegProcessors; i++ {
-		go api.startValidatorRegistrationDBProcessor()
+	// start things specific for the proposer API
+	if api.opts.ProposerAPI {
+		// Update list of known validators, and start refresh loop
+		go api.startKnownValidatorUpdates()
+
+		// Start the worker pool to process active validators
+		api.log.Infof("starting %d active validator processors", numActiveValidatorProcessors)
+		for i := 0; i < numActiveValidatorProcessors; i++ {
+			go api.startActiveValidatorProcessor()
+		}
+
+		// Start the validator registration db-save processor
+		api.log.Infof("starting %d validator registration processors", numValidatorRegProcessors)
+		for i := 0; i < numValidatorRegProcessors; i++ {
+			go api.startValidatorRegistrationDBProcessor()
+		}
 	}
 
 	// Process current slot
@@ -302,8 +314,8 @@ func (api *RelayAPI) StartServer() (err error) {
 		Addr:    api.opts.ListenAddr,
 		Handler: api.getRouter(),
 
-		ReadTimeout:       600 * time.Millisecond,
-		ReadHeaderTimeout: 400 * time.Millisecond,
+		ReadTimeout:       1500 * time.Millisecond,
+		ReadHeaderTimeout: 600 * time.Millisecond,
 		WriteTimeout:      3 * time.Second,
 		IdleTimeout:       3 * time.Second,
 	}
@@ -326,6 +338,9 @@ func (api *RelayAPI) StopServer() (err error) {
 
 		// wait a few seconds, for any pending getPayload call to complete
 		time.Sleep(5 * time.Second)
+
+		// wait for any active getPayload call to finish
+		api.getPayloadCallsInFlight.Wait()
 	}
 
 	// shutdown
@@ -372,8 +387,10 @@ func (api *RelayAPI) processNewSlot(headSlot uint64) {
 		"slotStartNextEpoch": (epoch + 1) * uint64(common.SlotsPerEpoch),
 	}).Infof("updated headSlot to %d", headSlot)
 
-	// Regularly update proposer duties in the background
-	go api.updateProposerDuties(headSlot)
+	if api.opts.BlockBuilderAPI {
+		// Update proposer duties in the background
+		go api.updateProposerDuties(headSlot)
+	}
 }
 
 func (api *RelayAPI) updateProposerDuties(headSlot uint64) {
@@ -469,94 +486,145 @@ func (api *RelayAPI) handleRegisterValidator(w http.ResponseWriter, req *http.Re
 		"mevBoostV": common.GetMevBoostVersionFromUserAgent(ua),
 	})
 
-	respondError := func(code int, msg string) {
-		log.Warn("bad request: ", msg)
-		api.RespondError(w, code, msg)
-	}
-
 	start := time.Now()
 	registrationTimeUpperBound := start.Add(10 * time.Second)
 
-	registrations := []types.SignedValidatorRegistration{}
+	numRegTotal := 0
+	numRegProcessed := 0
+	numRegActive := 0
 	numRegNew := 0
+	processingStoppedByError := false
 
-	if err := json.NewDecoder(req.Body).Decode(&registrations); err != nil {
-		respondError(http.StatusBadRequest, "failed to decode payload")
+	respondError := func(code int, msg string) {
+		processingStoppedByError = true
+		log.Warnf("error: %s", msg)
+		api.RespondError(w, code, msg)
+	}
+
+	if req.ContentLength == 0 {
+		respondError(http.StatusBadRequest, "empty request")
 		return
 	}
 
-	// Possible optimisations:
-	// - GetValidatorRegistrationTimestamp could keep a cache in memory for some time and check memory first before going to Redis
-	// - Do multiple loops and filter down set of registrations, and batch checks for all registrations instead of locking for each individually:
-	//   (1) sanity checks, (2) IsKnownValidator, (3) CheckTimestamp, (4) Batch SetValidatorRegistration
-	for _, registration := range registrations {
-		if registration.Message == nil {
-			respondError(http.StatusBadRequest, "registration without message")
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		log.WithError(err).WithField("contentLength", req.ContentLength).Warn("failed to read request body")
+		api.RespondError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	req.Body.Close()
+
+	parseRegistration := func(value []byte) (pkHex types.PubkeyHex, timestampInt int64, err error) {
+		pubkey, err := jsonparser.GetUnsafeString(value, "message", "pubkey")
+		if err != nil {
+			return pkHex, timestampInt, fmt.Errorf("registration message error (pubkey): %w", err)
+		}
+
+		timestamp, err := jsonparser.GetUnsafeString(value, "message", "timestamp")
+		if err != nil {
+			return pkHex, timestampInt, fmt.Errorf("registration message error (timestamp): %w", err)
+		}
+
+		timestampInt, err = strconv.ParseInt(timestamp, 10, 64)
+		if err != nil {
+			return pkHex, timestampInt, fmt.Errorf("invalid timestamp: %w", err)
+		}
+
+		return types.PubkeyHex(pubkey), timestampInt, nil
+	}
+
+	// Iterate over the registrations
+	_, err = jsonparser.ArrayEach(body, func(value []byte, dataType jsonparser.ValueType, offset int, _err error) {
+		numRegTotal += 1
+		if processingStoppedByError {
+			return
+		}
+		numRegProcessed += 1
+
+		// Extract immediately necessary registration fields
+		pkHex, timestampInt, err := parseRegistration(value)
+		if err != nil {
+			respondError(http.StatusBadRequest, err.Error())
 			return
 		}
 
-		pubkey := registration.Message.Pubkey.PubkeyHex()
-		regLog := api.log.WithFields(logrus.Fields{
-			"pubkey":       pubkey,
-			"feeRecipient": registration.Message.FeeRecipient.String(),
-		})
+		// Add validator pubkey to logs
+		regLog := api.log.WithField("pubkey", pkHex.String())
 
-		registrationTime := time.Unix(int64(registration.Message.Timestamp), 0)
+		// Ensure registration is not too far in the future
+		registrationTime := time.Unix(timestampInt, 0)
 		if registrationTime.After(registrationTimeUpperBound) {
 			respondError(http.StatusBadRequest, "timestamp too far in the future")
 			return
 		}
 
-		// Check if actually a real validator
-		isKnownValidator := api.datastore.IsKnownValidator(pubkey)
+		// Check if a real validator
+		isKnownValidator := api.datastore.IsKnownValidator(pkHex)
 		if !isKnownValidator {
-			respondError(http.StatusBadRequest, fmt.Sprintf("not a known validator: %s", pubkey))
+			respondError(http.StatusBadRequest, fmt.Sprintf("not a known validator: %s", pkHex.String()))
 			return
 		}
 
-		// Check for a previous registration timestamp
-		prevTimestamp, err := api.datastore.GetValidatorRegistrationTimestamp(pubkey)
-		if err != nil {
-			regLog.WithError(err).Infof("error getting last registration timestamp")
-		}
-
 		// Track active validators here
+		numRegActive += 1
 		select {
-		case api.activeValidatorC <- pubkey:
+		case api.activeValidatorC <- pkHex:
 		default:
 			regLog.Error("active validator channel full")
 		}
 
-		// Do nothing if the registration is already the latest
-		if prevTimestamp >= registration.Message.Timestamp {
-			continue
+		// Check for a previous registration timestamp
+		prevTimestamp, err := api.datastore.GetValidatorRegistrationTimestamp(pkHex)
+		if err != nil {
+			regLog.WithError(err).Error("error getting last registration timestamp")
+		} else if prevTimestamp >= uint64(timestampInt) {
+			// abort if the current registration timestamp is older or equal to the last known one
+			return
 		}
 
-		// Send to workers for signature verification and saving
-		numRegNew++
+		// Now we have a new registration to process
+		numRegNew += 1
+
+		// JSON-decode the registration now (needed for signature verification)
+		signedValidatorRegistration := new(types.SignedValidatorRegistration)
+		err = json.Unmarshal(value, signedValidatorRegistration)
+		if err != nil {
+			regLog.WithError(err).Error("error unmarshalling signed validator registration")
+			respondError(http.StatusBadRequest, fmt.Sprintf("error unmarshalling signed validator registration: %s", err.Error()))
+			return
+		}
 
 		// Verify the signature
-		ok, err := types.VerifySignature(registration.Message, api.opts.EthNetDetails.DomainBuilder, registration.Message.Pubkey[:], registration.Signature[:])
+		ok, err := types.VerifySignature(signedValidatorRegistration.Message, api.opts.EthNetDetails.DomainBuilder, signedValidatorRegistration.Message.Pubkey[:], signedValidatorRegistration.Signature[:])
 		if err != nil {
 			regLog.WithError(err).Error("error verifying registerValidator signature")
-			continue
-		} else if !ok {
-			api.RespondError(w, http.StatusBadRequest, fmt.Sprintf("failed to verify validator signature for %s", registration.Message.Pubkey.String()))
+			respondError(http.StatusBadRequest, fmt.Sprintf("error verifying registerValidator signature: %s", err.Error()))
 			return
-		} else {
-			// Save to database
-			select {
-			case api.validatorRegC <- registration:
-			default:
-				regLog.Error("validator registration channel full")
-			}
+		} else if !ok {
+			api.RespondError(w, http.StatusBadRequest, fmt.Sprintf("failed to verify validator signature for %s", signedValidatorRegistration.Message.Pubkey.String()))
+			return
 		}
+
+		// Save to database
+		select {
+		case api.validatorRegC <- *signedValidatorRegistration:
+		default:
+			regLog.Error("validator registration channel full")
+		}
+	})
+
+	if err != nil {
+		respondError(http.StatusBadRequest, "error in traversing json")
+		return
 	}
 
 	log = log.WithFields(logrus.Fields{
-		"numRegistrations":    len(registrations),
-		"numRegistrationsNew": numRegNew,
-		"timeNeededSec":       time.Since(start).Seconds(),
+		"timeNeededSec":             time.Since(start).Seconds(),
+		"numRegistrations":          numRegTotal,
+		"numRegistrationsActive":    numRegActive,
+		"numRegistrationsProcessed": numRegProcessed,
+		"numRegistrationsNew":       numRegNew,
+		"processingStoppedByError":  processingStoppedByError,
 	})
 	log.Info("validator registrations call processed")
 	w.WriteHeader(http.StatusOK)
@@ -632,24 +700,30 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 }
 
 func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) {
-	log := api.log.WithField("method", "getPayload")
+	api.getPayloadCallsInFlight.Add(1)
+	defer api.getPayloadCallsInFlight.Done()
+
+	ua := req.UserAgent()
+	log := api.log.WithFields(logrus.Fields{
+		"method":        "getPayload",
+		"ua":            ua,
+		"mevBoostV":     common.GetMevBoostVersionFromUserAgent(ua),
+		"contentLength": req.ContentLength,
+	})
 
 	payload := new(types.SignedBlindedBeaconBlock)
 	if err := json.NewDecoder(req.Body).Decode(payload); err != nil {
-		log.Warn("getPayload request failed to decode")
+		log.WithError(err).Warn("getPayload request failed to decode")
 		api.RespondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	slot := payload.Message.Slot
 	blockHash := payload.Message.Body.ExecutionPayloadHeader.BlockHash
-	ua := req.UserAgent()
 	log = log.WithFields(logrus.Fields{
 		"slot":      slot,
 		"blockHash": blockHash.String(),
 		"idArg":     req.URL.Query().Get("id"),
-		"ua":        ua,
-		"mevBoostV": common.GetMevBoostVersionFromUserAgent(ua),
 	})
 
 	log.Debug("getPayload request received")
@@ -682,16 +756,21 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 	// Get the response - from memory, Redis or DB
 	// note that mev-boost might send getPayload for bids of other relays, thus this code wouldn't find anything
 	getPayloadResp, err := api.datastore.GetGetPayloadResponse(slot, proposerPubkey.String(), blockHash.String())
-	if err != nil {
-		log.WithError(err).Error("failed getting execution payload from db")
-		api.RespondError(w, http.StatusBadRequest, err.Error())
-		return
-	}
+	if err != nil || getPayloadResp == nil {
+		log.WithError(err).Warn("failed getting execution payload (1/2)")
+		time.Sleep(time.Duration(timeoutGetPayloadRetryMs) * time.Millisecond)
 
-	if getPayloadResp == nil {
-		log.Info("failed getting execution payload")
-		api.RespondError(w, http.StatusBadRequest, "no execution payload for this request")
-		return
+		// Try again
+		getPayloadResp, err = api.datastore.GetGetPayloadResponse(slot, proposerPubkey.String(), blockHash.String())
+		if err != nil {
+			log.WithError(err).Error("failed getting execution payload (2/2) - due to error")
+			api.RespondError(w, http.StatusBadRequest, err.Error())
+			return
+		} else if getPayloadResp == nil {
+			log.Warn("failed getting execution payload (2/2)")
+			api.RespondError(w, http.StatusBadRequest, "no execution payload for this request")
+			return
+		}
 	}
 
 	api.RespondOK(w, getPayloadResp)
@@ -703,15 +782,23 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 
 	// Save information about delivered payload
 	go func() {
-		err := api.db.SaveDeliveredPayload(slot, proposerPubkey, blockHash, payload)
+		bidTrace, err := api.redis.GetBidTrace(slot, proposerPubkey.String(), blockHash.String())
 		if err != nil {
-			log.WithError(err).Error("failed to save delivered payload")
+			log.WithError(err).Error("failed to get bidTrace for delivered payload from redis")
+		}
+
+		err = api.db.SaveDeliveredPayload(bidTrace, payload)
+		if err != nil {
+			log.WithError(err).WithFields(logrus.Fields{
+				"bidTrace": bidTrace,
+				"payload":  payload,
+			}).Error("failed to save delivered payload")
 		}
 
 		// Increment builder stats
 		err = api.db.IncBlockBuilderStatsAfterGetPayload(slot, blockHash.String())
 		if err != nil {
-			log.WithError(err).Error("could not increment builder-stats after getHeader")
+			log.WithError(err).Error("could not increment builder-stats after getPayload")
 		}
 	}()
 
@@ -737,7 +824,10 @@ func (api *RelayAPI) handleBuilderGetValidators(w http.ResponseWriter, req *http
 }
 
 func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Request) {
-	log := api.log.WithField("method", "submitNewBlock")
+	log := api.log.WithFields(logrus.Fields{
+		"method":        "submitNewBlock",
+		"contentLength": req.ContentLength,
+	})
 
 	payload := new(types.BuilderSubmitBlockRequest)
 	if err := json.NewDecoder(req.Body).Decode(payload); err != nil {
@@ -849,7 +939,7 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 	defer func() {
 		submissionEntry, err := api.db.SaveBuilderBlockSubmission(payload, simErr, isMostProfitableBlock)
 		if err != nil {
-			log.WithError(err).Error("saving builder block submission to database failed")
+			log.WithError(err).WithField("payload", payload).Error("saving builder block submission to database failed")
 			return
 		}
 
@@ -864,6 +954,7 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 	simErr = api.blockSimRateLimiter.send(req.Context(), payload, builderIsHighPrio)
 
 	if simErr != nil {
+		log = log.WithField("simErr", simErr.Error())
 		log.WithError(simErr).WithFields(logrus.Fields{
 			"duration":   time.Since(t).Seconds(),
 			"numWaiting": api.blockSimRateLimiter.currentCounter(),
@@ -911,12 +1002,12 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 		Data:    payload.ExecutionPayload,
 	}
 
-	signedBidTrace := types.SignedBidTrace{
-		Message:   payload.Message,
-		Signature: payload.Signature,
+	bidTrace := common.BidTraceV2{
+		BidTrace:    *payload.Message,
+		BlockNumber: payload.ExecutionPayload.BlockNumber,
+		NumTx:       uint64(len(payload.ExecutionPayload.Transactions)),
 	}
-
-	err = api.datastore.SaveBlockSubmission(&signedBidTrace, &getHeaderResponse, &getPayloadResponse)
+	err = api.datastore.SaveBid(&bidTrace, &getHeaderResponse, &getPayloadResponse)
 	if err != nil {
 		log.WithError(err).Error("could not save bid and block")
 		api.RespondError(w, http.StatusBadRequest, err.Error())
@@ -1071,20 +1162,9 @@ func (api *RelayAPI) handleDataProposerPayloadDelivered(w http.ResponseWriter, r
 		return
 	}
 
-	response := []BidTraceJSON{}
-	for _, payload := range deliveredPayloads {
-		trace := BidTraceJSON{
-			Slot:                 payload.Slot,
-			ParentHash:           payload.ParentHash,
-			BlockHash:            payload.BlockHash,
-			BuilderPubkey:        payload.BuilderPubkey,
-			ProposerPubkey:       payload.ProposerPubkey,
-			ProposerFeeRecipient: payload.ProposerFeeRecipient,
-			GasLimit:             payload.GasLimit,
-			GasUsed:              payload.GasUsed,
-			Value:                payload.Value,
-		}
-		response = append(response, trace)
+	response := make([]common.BidTraceV2JSON, len(deliveredPayloads))
+	for i, payload := range deliveredPayloads {
+		response[i] = database.DeliveredPayloadEntryToBidTraceV2JSON(payload)
 	}
 
 	api.RespondOK(w, response)
@@ -1157,30 +1237,16 @@ func (api *RelayAPI) handleDataBuilderBidsReceived(w http.ResponseWriter, req *h
 		filters.Limit = _limit
 	}
 
-	deliveredPayloads, err := api.db.GetBuilderSubmissions(filters)
+	blockSubmissions, err := api.db.GetBuilderSubmissions(filters)
 	if err != nil {
 		api.log.WithError(err).Error("error getting recent payloads")
 		api.RespondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	response := []BidTraceWithTimestampJSON{}
-	for _, payload := range deliveredPayloads {
-		trace := BidTraceWithTimestampJSON{
-			Timestamp: payload.InsertedAt.Unix(),
-			BidTraceJSON: BidTraceJSON{
-				Slot:                 payload.Slot,
-				ParentHash:           payload.ParentHash,
-				BlockHash:            payload.BlockHash,
-				BuilderPubkey:        payload.BuilderPubkey,
-				ProposerPubkey:       payload.ProposerPubkey,
-				ProposerFeeRecipient: payload.ProposerFeeRecipient,
-				GasLimit:             payload.GasLimit,
-				GasUsed:              payload.GasUsed,
-				Value:                payload.Value,
-			},
-		}
-		response = append(response, trace)
+	response := make([]common.BidTraceV2WithTimestampJSON, len(blockSubmissions))
+	for i, payload := range blockSubmissions {
+		response[i] = database.BuilderSubmissionEntryToBidTraceV2WithTimestampJSON(payload)
 	}
 
 	api.RespondOK(w, response)

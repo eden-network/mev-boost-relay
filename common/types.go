@@ -115,58 +115,59 @@ func NewEthNetworkDetails(networkName string) (ret *EthNetworkDetails, err error
 	}, nil
 }
 
-type EpochSummary struct {
-	Epoch uint64 `json:"epoch" db:"epoch"`
-
-	// First and last slots are just derived from the epoch
-	SlotFirst uint64 `json:"slot_first" db:"slot_first"`
-	SlotLast  uint64 `json:"slot_last"  db:"slot_last"`
-
-	// Registered are those that were actually used by the relay (some might be skipped if only one relay and it started in the middle of the epoch)
-	SlotFirstProcessed uint64 `json:"slot_first_processed" db:"slot_first_processed"`
-	SlotLastProcessed  uint64 `json:"slot_last_processed"  db:"slot_last_processed"`
-
-	// Validator stats
-	ValidatorsKnownTotal                     uint64 `json:"validators_known_total"                      db:"validators_known_total"`
-	ValidatorRegistrationsTotal              uint64 `json:"validator_registrations_total"               db:"validator_registrations_total"`
-	ValidatorRegistrationsSaved              uint64 `json:"validator_registrations_saved"               db:"validator_registrations_saved"`
-	ValidatorRegistrationsReceivedUnverified uint64 `json:"validator_registrations_received_unverified" db:"validator_registrations_received_unverified"`
-
-	// The number of requests are the count of all requests to a specific path, even invalid ones
-	NumRegisterValidatorRequests uint64 `json:"num_register_validator_requests" db:"num_register_validator_requests"`
-	NumGetHeaderRequests         uint64 `json:"num_get_header_requests"         db:"num_get_header_requests"`
-	NumGetPayloadRequests        uint64 `json:"num_get_payload_requests"        db:"num_get_payload_requests"`
-
-	// Responses to successful queries
-	NumHeaderSentOk       uint64 `json:"num_header_sent_ok"       db:"num_header_sent_ok"`
-	NumHeaderSent204      uint64 `json:"num_header_sent_204"      db:"num_header_sent_204"`
-	NumPayloadSent        uint64 `json:"num_payload_sent"         db:"num_payload_sent"`
-	NumBuilderBidReceived uint64 `json:"num_builder_bid_received" db:"num_builder_bid_received"`
-
-	// Whether all slots were seen
-	IsComplete bool `json:"is_complete" db:"is_complete"`
+type BidTraceV2 struct {
+	types.BidTrace
+	BlockNumber uint64 `json:"block_number,string" db:"block_number"`
+	NumTx       uint64 `json:"num_tx,string" db:"num_tx"`
 }
 
-type SlotSummary struct {
-	Slot   uint64 `json:"slot"   db:"slot"`
-	Epoch  uint64 `json:"epoch"  db:"epoch"`
-	Missed bool   `json:"missed" db:"missed"`
+type BidTraceV2JSON struct {
+	Slot                 uint64 `json:"slot,string"`
+	ParentHash           string `json:"parent_hash"`
+	BlockHash            string `json:"block_hash"`
+	BuilderPubkey        string `json:"builder_pubkey"`
+	ProposerPubkey       string `json:"proposer_pubkey"`
+	ProposerFeeRecipient string `json:"proposer_fee_recipient"`
+	GasLimit             uint64 `json:"gas_limit,string"`
+	GasUsed              uint64 `json:"gas_used,string"`
+	Value                string `json:"value"`
+	NumTx                uint64 `json:"num_tx,string"`
+	BlockNumber          uint64 `json:"block_number,string"`
+}
 
-	// General validator stats
-	ValidatorsKnownTotal        uint64 `json:"validators_known_total"        db:"validators_known_total"`
-	ValidatorRegistrationsTotal uint64 `json:"validator_registrations_total" db:"validator_registrations_total"`
+func (b *BidTraceV2JSON) CSVHeader() []string {
+	return []string{
+		"slot",
+		"parent_hash",
+		"block_hash",
+		"builder_pubkey",
+		"proposer_pubkey",
+		"proposer_fee_recipient",
+		"gas_limit",
+		"gas_used",
+		"value",
+		"num_tx",
+		"block_number",
+	}
+}
 
-	// Slot proposer details
-	ProposerPubkey       string `json:"proposer_pubkey"        db:"proposer_pubkey"`
-	ProposerIsRegistered bool   `json:"proposer_is_registered" db:"proposer_is_registered"`
+func (b *BidTraceV2JSON) ToCSVRecord() []string {
+	return []string{
+		fmt.Sprint(b.Slot),
+		b.ParentHash,
+		b.BlockHash,
+		b.BuilderPubkey,
+		b.ProposerPubkey,
+		b.ProposerFeeRecipient,
+		fmt.Sprint(b.GasLimit),
+		fmt.Sprint(b.GasUsed),
+		b.Value,
+		fmt.Sprint(b.NumTx),
+		fmt.Sprint(b.BlockNumber),
+	}
+}
 
-	// The number of requests are the count of all requests to a specific path, even invalid ones
-	NumGetHeaderRequests  uint64 `json:"num_get_header_requests"  db:"num_get_header_requests"`
-	NumGetPayloadRequests uint64 `json:"num_get_payload_requests" db:"num_get_payload_requests"`
-
-	// Responses to successful queries
-	NumHeaderSentOk       uint64 `json:"num_header_sent_ok"       db:"num_header_sent_ok"`
-	NumHeaderSent204      uint64 `json:"num_header_sent_204"      db:"num_header_sent_204"`
-	NumPayloadSent        uint64 `json:"num_payload_sent"         db:"num_payload_sent"`
-	NumBuilderBidReceived uint64 `json:"num_builder_bid_received" db:"num_builder_bid_received"`
+type BidTraceV2WithTimestampJSON struct {
+	BidTraceV2JSON
+	Timestamp int64 `json:"timestamp,string,omitempty"`
 }

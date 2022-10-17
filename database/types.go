@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/flashbots/go-boost-utils/types"
@@ -101,6 +102,20 @@ type ExecutionPayloadEntry struct {
 	Payload string `db:"payload"`
 }
 
+var ExecutionPayloadEntryCSVHeader = []string{"id", "inserted_at", "slot", "proposer_pubkey", "block_hash", "version", "payload"}
+
+func (e *ExecutionPayloadEntry) ToCSVRecord() []string {
+	return []string{
+		fmt.Sprint(e.ID),
+		e.InsertedAt.UTC().String(),
+		fmt.Sprint(e.Slot),
+		e.ProposerPubkey,
+		e.BlockHash,
+		e.Version,
+		e.Payload,
+	}
+}
+
 type BuilderBlockSubmissionEntry struct {
 	ID         int64     `db:"id"`
 	InsertedAt time.Time `db:"inserted_at"`
@@ -126,7 +141,7 @@ type BuilderBlockSubmissionEntry struct {
 	GasUsed  uint64 `db:"gas_used"`
 	GasLimit uint64 `db:"gas_limit"`
 
-	NumTx int    `db:"num_tx"`
+	NumTx uint64 `db:"num_tx"`
 	Value string `db:"value"`
 
 	// Helpers
@@ -139,7 +154,6 @@ type DeliveredPayloadEntry struct {
 	ID         int64     `db:"id"`
 	InsertedAt time.Time `db:"inserted_at"`
 
-	ExecutionPayloadID       sql.NullInt64  `db:"execution_payload_id"`
 	SignedBlindedBeaconBlock sql.NullString `db:"signed_blinded_beacon_block"`
 
 	Slot  uint64 `db:"slot"`
@@ -156,7 +170,7 @@ type DeliveredPayloadEntry struct {
 	GasUsed  uint64 `db:"gas_used"`
 	GasLimit uint64 `db:"gas_limit"`
 
-	NumTx int    `db:"num_tx"`
+	NumTx uint64 `db:"num_tx"`
 	Value string `db:"value"`
 }
 

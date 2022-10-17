@@ -101,10 +101,10 @@ redis-cli DEL boost-relay/sepolia:validators-registration boost-relay/sepolia:va
 * `DISABLE_BLOCK_PUBLISHING` - disable publishing blocks to the beacon node at the end of getPayload
 * `DISABLE_LOWPRIO_BUILDERS` - reject block submissions by low-prio builders
 * `DISABLE_BID_MEMORY_CACHE` - disable bids to go through in-memory cache. forces to go through redis/db
-* `DISABLE_BID_REDIS_CACHE` - disable bids to go through redis cache. forces to go through memory/db
 * `NUM_ACTIVE_VALIDATOR_PROCESSORS` - proposer API - number of goroutines to listen to the active validators channel
-* `ACTIVE_VALIDATOR_HOURS` - number of hours to track active proposers in redis
-
+* `NUM_VALIDATOR_REG_PROCESSORS` - proposer API - number of goroutines to listen to the validator registration channel
+* `ACTIVE_VALIDATOR_HOURS` - number of hours to track active proposers in redis (default: 3)
+* `GETPAYLOAD_RETRY_TIMEOUT_MS` - getPayload retry getting a payload if first try failed (default: 100)
 
 ### Updating the website
 
