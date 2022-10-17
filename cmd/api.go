@@ -52,6 +52,7 @@ func init() {
 	apiCmd.Flags().StringVar(&apiSecretKey, "secret-key", apiDefaultSecretKey, "secret key for signing bids")
 	apiCmd.Flags().StringVar(&apiBlockSimURL, "blocksim", apiDefaultBlockSim, "URL for block simulator")
 	apiCmd.Flags().StringVar(&network, "network", defaultNetwork, "Which network to use")
+	apiCmd.Flags().StringSliceVar(&priorityBuilders, "priority-builders", defaultPriorityBuilders, "high priority builders")
 
 	apiCmd.Flags().BoolVar(&apiPprofEnabled, "pprof", apiDefaultPprofEnabled, "enable pprof API")
 	apiCmd.Flags().BoolVar(&apiInternalAPI, "internal-api", apiDefaultInternalAPIEnabled, "enable internal API (/internal/...)")
@@ -115,6 +116,24 @@ var apiCmd = &cobra.Command{
 		ds, err := datastore.NewDatastore(log, redis, db)
 		if err != nil {
 			log.WithError(err).Fatalf("Failed setting up prod datastore")
+		}
+
+		if len(priorityBuilders) == 0 {
+			log.Infof("no high priority builders specified")
+		} else {
+			log.Infof("Using high priority builders: %s", strings.Join(priorityBuilders, ", "))
+			for _, builderPubkey := range priorityBuilders {
+				newStatus := datastore.MakeBlockBuilderStatus(true, false)
+				err := redis.SetBlockBuilderStatus(builderPubkey, newStatus)
+				if err != nil {
+					log.WithError(err).Error("could not set block builder status in redis for builder: %s", builderPubkey)
+				}
+
+				err = db.SetBlockBuilderStatus(builderPubkey, true, false)
+				if err != nil {
+					log.WithError(err).Error("could not set block builder status in database for builder: %s", builderPubkey)
+				}
+			}
 		}
 
 		opts := api.RelayAPIOpts{
