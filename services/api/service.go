@@ -911,12 +911,12 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 	}
 
 	// Verify the signature
-	// ok, err := types.VerifySignature(payload.Message, api.opts.EthNetDetails.DomainBuilder, payload.Message.BuilderPubkey[:], payload.Signature[:])
-	// if !ok || err != nil {
-	// 	log.WithError(err).Warnf("could not verify builder signature")
-	// 	api.RespondError(w, http.StatusBadRequest, "invalid signature")
-	// 	return
-	// }
+	ok, err := types.VerifySignature(payload.Message, api.opts.EthNetDetails.DomainBuilder, payload.Message.BuilderPubkey[:], payload.Signature[:])
+	if !ok || err != nil {
+		log.WithError(err).Warnf("could not verify builder signature")
+		api.RespondError(w, http.StatusBadRequest, "invalid signature")
+		return
+	}
 
 	whitelistedBuilders := map[string]bool{
 		"0xa5eec32c40cc3737d643c24982c7f097354150aac1612d4089e2e8af44dbeefaec08a11c76bd57e7d58697ad8b2bbef5": true,
