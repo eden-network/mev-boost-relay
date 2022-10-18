@@ -28,6 +28,7 @@ linters:
     - deadcode
     - varcheck
     - interfacebloat
+    - maintidx
 
     #
     # Disabled because of generics:
