@@ -126,12 +126,12 @@ var apiCmd = &cobra.Command{
 				newStatus := datastore.MakeBlockBuilderStatus(true, false)
 				err := redis.SetBlockBuilderStatus(builderPubkey, newStatus)
 				if err != nil {
-					log.WithError(err).Error("could not set block builder status in redis for builder: %s", builderPubkey)
+					log.WithError(err).Errorf("could not set block builder status in redis for builder: %s", builderPubkey)
 				}
 
 				err = db.SetBlockBuilderStatus(builderPubkey, true, false)
 				if err != nil {
-					log.WithError(err).Error("could not set block builder status in database for builder: %s", builderPubkey)
+					log.WithError(err).Errorf("could not set block builder status in database for builder: %s", builderPubkey)
 				}
 			}
 		}
