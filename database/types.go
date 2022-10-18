@@ -2,7 +2,10 @@ package database
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
+
+	"github.com/flashbots/go-boost-utils/types"
 )
 
 func NewNullInt64(i int64) sql.NullInt64 {
@@ -26,6 +29,8 @@ type GetPayloadsFilters struct {
 	BlockHash      string
 	BlockNumber    uint64
 	ProposerPubkey string
+	BuilderPubkey  string
+	OrderByValue   int8
 }
 
 type GetBuilderSubmissionsFilters struct {
@@ -34,6 +39,7 @@ type GetBuilderSubmissionsFilters struct {
 	BlockHash   string
 	BlockNumber uint64
 	// Cursor      uint64
+	BuilderPubkey string
 }
 
 type ValidatorRegistrationEntry struct {
@@ -47,6 +53,43 @@ type ValidatorRegistrationEntry struct {
 	Signature    string `db:"signature"`
 }
 
+func (reg ValidatorRegistrationEntry) ToSignedValidatorRegistration() (*types.SignedValidatorRegistration, error) {
+	pubkey, err := types.HexToPubkey(reg.Pubkey)
+	if err != nil {
+		return nil, err
+	}
+
+	feeRec, err := types.HexToAddress(reg.FeeRecipient)
+	if err != nil {
+		return nil, err
+	}
+
+	sig, err := types.HexToSignature(reg.Signature)
+	if err != nil {
+		return nil, err
+	}
+
+	return &types.SignedValidatorRegistration{
+		Message: &types.RegisterValidatorRequestMessage{
+			Pubkey:       pubkey,
+			FeeRecipient: feeRec,
+			Timestamp:    reg.Timestamp,
+			GasLimit:     reg.GasLimit,
+		},
+		Signature: sig,
+	}, nil
+}
+
+func SignedValidatorRegistrationToEntry(valReg types.SignedValidatorRegistration) ValidatorRegistrationEntry {
+	return ValidatorRegistrationEntry{
+		Pubkey:       valReg.Message.Pubkey.String(),
+		FeeRecipient: valReg.Message.FeeRecipient.String(),
+		Timestamp:    valReg.Message.Timestamp,
+		GasLimit:     valReg.Message.GasLimit,
+		Signature:    valReg.Signature.String(),
+	}
+}
+
 type ExecutionPayloadEntry struct {
 	ID         int64     `db:"id"`
 	InsertedAt time.Time `db:"inserted_at"`
@@ -57,6 +100,20 @@ type ExecutionPayloadEntry struct {
 
 	Version string `db:"version"`
 	Payload string `db:"payload"`
+}
+
+var ExecutionPayloadEntryCSVHeader = []string{"id", "inserted_at", "slot", "proposer_pubkey", "block_hash", "version", "payload"}
+
+func (e *ExecutionPayloadEntry) ToCSVRecord() []string {
+	return []string{
+		fmt.Sprint(e.ID),
+		e.InsertedAt.UTC().String(),
+		fmt.Sprint(e.Slot),
+		e.ProposerPubkey,
+		e.BlockHash,
+		e.Version,
+		e.Payload,
+	}
 }
 
 type BuilderBlockSubmissionEntry struct {
@@ -84,7 +141,7 @@ type BuilderBlockSubmissionEntry struct {
 	GasUsed  uint64 `db:"gas_used"`
 	GasLimit uint64 `db:"gas_limit"`
 
-	NumTx int    `db:"num_tx"`
+	NumTx uint64 `db:"num_tx"`
 	Value string `db:"value"`
 
 	// Helpers
@@ -97,7 +154,6 @@ type DeliveredPayloadEntry struct {
 	ID         int64     `db:"id"`
 	InsertedAt time.Time `db:"inserted_at"`
 
-	ExecutionPayloadID       sql.NullInt64  `db:"execution_payload_id"`
 	SignedBlindedBeaconBlock sql.NullString `db:"signed_blinded_beacon_block"`
 
 	Slot  uint64 `db:"slot"`
@@ -114,7 +170,7 @@ type DeliveredPayloadEntry struct {
 	GasUsed  uint64 `db:"gas_used"`
 	GasLimit uint64 `db:"gas_limit"`
 
-	NumTx int    `db:"num_tx"`
+	NumTx uint64 `db:"num_tx"`
 	Value string `db:"value"`
 }
 
@@ -135,6 +191,5 @@ type BlockBuilderEntry struct {
 	NumSubmissionsSimError uint64 `db:"num_submissions_simerror" json:"num_submissions_simerror"`
 	NumSubmissionsTopBid   uint64 `db:"num_submissions_topbid"   json:"num_submissions_topbid"`
 
-	NumSentGetHeader  uint64 `db:"num_sent_getheader"  json:"num_sent_getheader"`
 	NumSentGetPayload uint64 `db:"num_sent_getpayload" json:"num_sent_getpayload"`
 }

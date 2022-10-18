@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/flashbots/go-boost-utils/bls"
@@ -11,23 +14,27 @@ import (
 	"github.com/flashbots/mev-boost-relay/database"
 	"github.com/flashbots/mev-boost-relay/datastore"
 	"github.com/flashbots/mev-boost-relay/services/api"
-	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
 var (
-	apiDefaultListenAddr   = common.GetEnv("LISTEN_ADDR", "localhost:9062")
-	apiDefaultBlockSim     = common.GetEnv("BLOCKSIM_URI", "http://localhost:8545")
-	apiDefaultSecretKey    = common.GetEnv("SECRET_KEY", "")
-	apiDefaultPprofEnabled = os.Getenv("PPROF") != ""
-	apiDefaultLogTag       = os.Getenv("LOG_TAG")
+	apiDefaultListenAddr = common.GetEnv("LISTEN_ADDR", "localhost:9062")
+	apiDefaultBlockSim   = common.GetEnv("BLOCKSIM_URI", "http://localhost:8545")
+	apiDefaultSecretKey  = common.GetEnv("SECRET_KEY", "")
+	apiDefaultLogTag     = os.Getenv("LOG_TAG")
+	apiDefaultLogVersion = os.Getenv("LOG_VERSION") == "1"
+
+	apiDefaultPprofEnabled       = os.Getenv("PPROF") == "1"
+	apiDefaultInternalAPIEnabled = os.Getenv("ENABLE_INTERNAL_API") == "1"
 
 	apiListenAddr   string
 	apiPprofEnabled bool
 	apiSecretKey    string
 	apiBlockSimURL  string
 	apiDebug        bool
+	apiInternalAPI  bool
 	apiLogTag       string
+	apiLogVersion   bool
 )
 
 func init() {
@@ -35,6 +42,7 @@ func init() {
 	apiCmd.Flags().BoolVar(&logJSON, "json", defaultLogJSON, "log in JSON format instead of text")
 	apiCmd.Flags().StringVar(&logLevel, "loglevel", defaultLogLevel, "log-level: trace, debug, info, warn/warning, error, fatal, panic")
 	apiCmd.Flags().StringVar(&apiLogTag, "log-tag", apiDefaultLogTag, "if set, a 'tag' field will be added to all log entries")
+	apiCmd.Flags().BoolVar(&apiLogVersion, "log-version", apiDefaultLogVersion, "if set, a 'version' field will be added to all log entries")
 	apiCmd.Flags().BoolVar(&apiDebug, "debug", false, "debug logging")
 
 	apiCmd.Flags().StringVar(&apiListenAddr, "listen-addr", apiDefaultListenAddr, "listen address for webserver")
@@ -42,9 +50,12 @@ func init() {
 	apiCmd.Flags().StringVar(&redisURI, "redis-uri", defaultRedisURI, "redis uri")
 	apiCmd.Flags().StringVar(&postgresDSN, "db", defaultPostgresDSN, "PostgreSQL DSN")
 	apiCmd.Flags().StringVar(&apiSecretKey, "secret-key", apiDefaultSecretKey, "secret key for signing bids")
-	apiCmd.Flags().BoolVar(&apiPprofEnabled, "pprof", apiDefaultPprofEnabled, "enable pprof API")
 	apiCmd.Flags().StringVar(&apiBlockSimURL, "blocksim", apiDefaultBlockSim, "URL for block simulator")
 	apiCmd.Flags().StringVar(&network, "network", defaultNetwork, "Which network to use")
+	apiCmd.Flags().StringSliceVar(&priorityBuilders, "priority-builders", defaultPriorityBuilders, "high priority builders")
+
+	apiCmd.Flags().BoolVar(&apiPprofEnabled, "pprof", apiDefaultPprofEnabled, "enable pprof API")
+	apiCmd.Flags().BoolVar(&apiInternalAPI, "internal-api", apiDefaultInternalAPIEnabled, "enable internal API (/internal/...)")
 }
 
 var apiCmd = &cobra.Command{
@@ -57,10 +68,12 @@ var apiCmd = &cobra.Command{
 			logLevel = "debug"
 		}
 
-		common.LogSetup(logJSON, logLevel)
-		log := logrus.WithField("module", "relay/api")
+		log := common.LogSetup(logJSON, logLevel).WithField("service", "relay/api")
 		if apiLogTag != "" {
 			log = log.WithField("tag", apiLogTag)
+		}
+		if apiLogVersion {
+			log = log.WithField("version", Version)
 		}
 		log.Infof("boost-relay %s", Version)
 
@@ -89,15 +102,38 @@ var apiCmd = &cobra.Command{
 		log.Infof("Connected to Redis at %s", redisURI)
 
 		// Connect to Postgres
-		log.Infof("Connecting to Postgres database...")
+		dbURL, err := url.Parse(postgresDSN)
+		if err != nil {
+			log.WithError(err).Fatalf("couldn't read db URL")
+		}
+		log.Infof("Connecting to Postgres database at %s%s ...", dbURL.Host, dbURL.Path)
 		db, err := database.NewDatabaseService(postgresDSN)
 		if err != nil {
-			log.WithError(err).Fatalf("Failed to connect to Postgres database at %s", postgresDSN)
+			log.WithError(err).Fatalf("Failed to connect to Postgres database at %s%s", dbURL.Host, dbURL.Path)
 		}
 
+		log.Info("Setting up datastore...")
 		ds, err := datastore.NewDatastore(log, redis, db)
 		if err != nil {
 			log.WithError(err).Fatalf("Failed setting up prod datastore")
+		}
+
+		if len(priorityBuilders) == 0 {
+			log.Infof("no high priority builders specified")
+		} else {
+			log.Infof("Using high priority builders: %s", strings.Join(priorityBuilders, ", "))
+			for _, builderPubkey := range priorityBuilders {
+				newStatus := datastore.MakeBlockBuilderStatus(true, false)
+				err := redis.SetBlockBuilderStatus(builderPubkey, newStatus)
+				if err != nil {
+					log.WithError(err).Errorf("could not set block builder status in redis for builder: %s", builderPubkey)
+				}
+
+				err = db.SetBlockBuilderStatus(builderPubkey, true, false)
+				if err != nil {
+					log.WithError(err).Errorf("could not set block builder status in database for builder: %s", builderPubkey)
+				}
+			}
 		}
 
 		opts := api.RelayAPIOpts{
@@ -113,6 +149,7 @@ var apiCmd = &cobra.Command{
 			ProposerAPI:     true,
 			BlockBuilderAPI: true,
 			DataAPI:         true,
+			InternalAPI:     apiInternalAPI,
 			PprofAPI:        apiPprofEnabled,
 		}
 
@@ -132,13 +169,30 @@ var apiCmd = &cobra.Command{
 		}
 
 		// Create the relay service
+		log.Info("Setting up relay service...")
 		srv, err := api.NewRelayAPI(opts)
 		if err != nil {
 			log.WithError(err).Fatal("failed to create service")
 		}
 
+		// Create a signal handler
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			sig := <-sigs
+			log.Infof("signal received: %s", sig)
+			err := srv.StopServer()
+			if err != nil {
+				log.WithError(err).Fatal("error stopping server")
+			}
+		}()
+
 		// Start the server
 		log.Infof("Webserver starting on %s ...", apiListenAddr)
-		log.Fatal(srv.StartServer())
+		err = srv.StartServer()
+		if err != nil {
+			log.WithError(err).Fatal("server error")
+		}
+		log.Info("bye")
 	},
 }

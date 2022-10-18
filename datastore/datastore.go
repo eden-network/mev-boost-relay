@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/flashbots/go-boost-utils/types"
+	"github.com/flashbots/mev-boost-relay/common"
 	"github.com/flashbots/mev-boost-relay/database"
 	"github.com/sirupsen/logrus"
 )
@@ -44,7 +45,6 @@ type Datastore struct {
 
 	// feature flags
 	ffDisableBidMemoryCache bool
-	ffDisableBidRedisCache  bool
 }
 
 func NewDatastore(log *logrus.Entry, redisCache *RedisCache, db database.IDatabaseService) (ds *Datastore, err error) {
@@ -61,11 +61,6 @@ func NewDatastore(log *logrus.Entry, redisCache *RedisCache, db database.IDataba
 	if os.Getenv("DISABLE_BID_MEMORY_CACHE") == "1" {
 		ds.log.Warn("env: DISABLE_BID_MEMORY_CACHE - disabling in-memory bid cache")
 		ds.ffDisableBidMemoryCache = true
-	}
-
-	if os.Getenv("DISABLE_BID_REDIS_CACHE") == "1" {
-		ds.log.Warn("env: DISABLE_BID_REDIS_CACHE - disabling redis bid cache")
-		ds.ffDisableBidRedisCache = true
 	}
 
 	return ds, err
@@ -110,71 +105,75 @@ func (ds *Datastore) NumKnownValidators() int {
 	return len(ds.knownValidatorsByIndex)
 }
 
-func (ds *Datastore) NumRegisteredValidators() (int64, error) {
-	return ds.redis.NumRegisteredValidators()
-}
-
-// GetValidatorRegistration returns the validator registration for the given proposerPubkey. If not found then it returns (nil, nil). If
-// there's a datastore error, then an error will be returned.
-func (ds *Datastore) GetValidatorRegistration(pubkeyHex types.PubkeyHex) (*types.SignedValidatorRegistration, error) {
-	return ds.redis.GetValidatorRegistration(pubkeyHex)
+func (ds *Datastore) NumRegisteredValidators() (uint64, error) {
+	return ds.db.NumRegisteredValidators()
 }
 
 func (ds *Datastore) GetValidatorRegistrationTimestamp(pubkeyHex types.PubkeyHex) (uint64, error) {
 	return ds.redis.GetValidatorRegistrationTimestamp(pubkeyHex)
 }
 
-// SetValidatorRegistration saves a validator registration into both Redis and the database
-func (ds *Datastore) SetValidatorRegistration(entry types.SignedValidatorRegistration) error {
-	err := ds.redis.SetValidatorRegistration(entry)
+// SaveValidatorRegistration saves a validator registration into both Redis and the database
+func (ds *Datastore) SaveValidatorRegistration(entry types.SignedValidatorRegistration) error {
+	// First save in the database
+	err := ds.db.SaveValidatorRegistration(database.SignedValidatorRegistrationToEntry(entry))
 	if err != nil {
-		ds.log.WithError(err).WithField("registration", fmt.Sprintf("%+v", entry)).Error("error updating validator registration")
+		ds.log.WithError(err).Error("failed to save validator registration to database")
 		return err
 	}
 
-	err = ds.db.SaveValidatorRegistration(entry)
+	// then save in redis
+	pk := types.NewPubkeyHex(entry.Message.Pubkey.String())
+	err = ds.redis.SetValidatorRegistrationTimestampIfNewer(pk, entry.Message.Timestamp)
 	if err != nil {
-		ds.log.WithError(err).Error("failed to save validator registration to database")
+		ds.log.WithError(err).WithField("registration", fmt.Sprintf("%+v", entry)).Error("error updating validator registration")
 		return err
 	}
 
 	return nil
 }
 
-// SaveBlockSubmission stores getHeader and getPayload for later use, to memory and Redis. Note: saving to Postgres not needed, because getHeader doesn't currently check the database, getPayload finds the data it needs through a sql query.
-func (ds *Datastore) SaveBlockSubmission(signedBidTrace *types.SignedBidTrace, headerResp *types.GetHeaderResponse, payloadResp *types.GetPayloadResponse) error {
+// SaveBid stores getHeader and getPayload for later use, to memory and Redis. Note: saving to Postgres not needed, because getHeader doesn't currently check the database, getPayload finds the data it needs through a sql query.
+func (ds *Datastore) SaveBid(bidTrace *common.BidTraceV2, headerResp *types.GetHeaderResponse, payloadResp *types.GetPayloadResponse) error {
 	_blockHash := strings.ToLower(headerResp.Data.Message.Header.BlockHash.String())
 	_parentHash := strings.ToLower(headerResp.Data.Message.Header.ParentHash.String())
-	_proposerPubkey := strings.ToLower(signedBidTrace.Message.ProposerPubkey.String())
+	_proposerPubkey := strings.ToLower(bidTrace.ProposerPubkey.String())
 
 	// Save to memory
-	bidKey := GetHeaderResponseKey{
-		Slot:           signedBidTrace.Message.Slot,
-		ParentHash:     _parentHash,
-		ProposerPubkey: _proposerPubkey,
+	if !ds.ffDisableBidMemoryCache {
+		bidKey := GetHeaderResponseKey{
+			Slot:           bidTrace.Slot,
+			ParentHash:     _parentHash,
+			ProposerPubkey: _proposerPubkey,
+		}
+
+		blockKey := GetPayloadResponseKey{
+			Slot:           bidTrace.Slot,
+			ProposerPubkey: _proposerPubkey,
+			BlockHash:      _blockHash,
+		}
+
+		ds.getHeaderResponsesLock.Lock()
+		ds.getHeaderResponses[bidKey] = headerResp
+		ds.getHeaderResponsesLock.Unlock()
+
+		ds.GetPayloadResponsesLock.Lock()
+		ds.GetPayloadResponses[blockKey] = payloadResp
+		ds.GetPayloadResponsesLock.Unlock()
 	}
 
-	blockKey := GetPayloadResponseKey{
-		Slot:           signedBidTrace.Message.Slot,
-		ProposerPubkey: _proposerPubkey,
-		BlockHash:      _blockHash,
-	}
-
-	ds.getHeaderResponsesLock.Lock()
-	ds.getHeaderResponses[bidKey] = headerResp
-	ds.getHeaderResponsesLock.Unlock()
-
-	ds.GetPayloadResponsesLock.Lock()
-	ds.GetPayloadResponses[blockKey] = payloadResp
-	ds.GetPayloadResponsesLock.Unlock()
-
-	// Save to Redis
-	err := ds.redis.SaveGetHeaderResponse(signedBidTrace.Message.Slot, _parentHash, _proposerPubkey, headerResp)
+	// Save to Redis: first the trace, then payload, then header
+	err := ds.redis.SaveBidTrace(bidTrace)
 	if err != nil {
 		return err
 	}
 
-	return ds.redis.SaveGetPayloadResponse(signedBidTrace.Message.Slot, _proposerPubkey, payloadResp)
+	err = ds.redis.SaveGetPayloadResponse(bidTrace.Slot, _proposerPubkey, payloadResp)
+	if err != nil {
+		return err
+	}
+
+	return ds.redis.SaveGetHeaderResponse(bidTrace.Slot, _parentHash, _proposerPubkey, headerResp)
 }
 
 func (ds *Datastore) CleanupOldBidsAndBlocks(headSlot uint64) (numRemoved, numRemaining int) {
@@ -247,18 +246,18 @@ func (ds *Datastore) GetGetPayloadResponse(slot uint64, proposerPubkey, blockHas
 		resp, found := ds.GetPayloadResponses[bidKey]
 		ds.getHeaderResponsesLock.RUnlock()
 		if found {
-			ds.log.Debug("getPayload response from in-memory")
+			ds.log.Debug("getPayload response from memory")
 			return resp, nil
 		}
 	}
 
 	// 2. try to get from Redis
-	if !ds.ffDisableBidRedisCache {
-		resp, err := ds.redis.GetGetPayloadResponse(slot, _proposerPubkey, _blockHash)
-		if err == nil {
-			ds.log.Debug("getPayload response from redis")
-			return resp, nil
-		}
+	resp, err := ds.redis.GetGetPayloadResponse(slot, _proposerPubkey, _blockHash)
+	if err != nil {
+		ds.log.WithError(err).Error("error getting getPayload response from redis")
+	} else {
+		ds.log.Debug("getPayload response from redis")
+		return resp, nil
 	}
 
 	// 3. try to get from database

@@ -1,11 +1,30 @@
 package database
 
-import "github.com/flashbots/go-boost-utils/types"
+import (
+	"github.com/flashbots/go-boost-utils/types"
+	"github.com/flashbots/mev-boost-relay/common"
+)
 
 type MockDB struct{}
 
-func (db MockDB) SaveValidatorRegistration(registration types.SignedValidatorRegistration) error {
+func (db MockDB) NumRegisteredValidators() (count uint64, err error) {
+	return 0, nil
+}
+
+func (db MockDB) SaveValidatorRegistration(entry ValidatorRegistrationEntry) error {
 	return nil
+}
+
+func (db MockDB) GetValidatorRegistration(pubkey string) (*ValidatorRegistrationEntry, error) {
+	return nil, nil
+}
+
+func (db MockDB) GetValidatorRegistrationsForPubkeys(pubkeys []string) (entries []*ValidatorRegistrationEntry, err error) {
+	return nil, nil
+}
+
+func (db MockDB) GetLatestValidatorRegistrations(timestampOnly bool) ([]*ValidatorRegistrationEntry, error) {
+	return nil, nil
 }
 
 func (db MockDB) SaveBuilderBlockSubmission(payload *types.BuilderSubmitBlockRequest, simError error, isMostProfitable bool) (entry *BuilderBlockSubmissionEntry, err error) {
@@ -20,11 +39,23 @@ func (db MockDB) GetExecutionPayloadEntryBySlotPkHash(slot uint64, proposerPubke
 	return nil, nil
 }
 
+func (db MockDB) GetExecutionPayloads(idFirst, idLast uint64) (entries []*ExecutionPayloadEntry, err error) {
+	return nil, nil
+}
+
+func (db MockDB) DeleteExecutionPayloads(idFirst, idLast uint64) error {
+	return nil
+}
+
 func (db MockDB) GetBlockSubmissionEntry(slot uint64, proposerPubkey, blockHash string) (entry *BuilderBlockSubmissionEntry, err error) {
 	return nil, nil
 }
 
 func (db MockDB) GetRecentDeliveredPayloads(filters GetPayloadsFilters) ([]*DeliveredPayloadEntry, error) {
+	return nil, nil
+}
+
+func (db MockDB) GetDeliveredPayloads(idFirst, idLast uint64) (entries []*DeliveredPayloadEntry, err error) {
 	return nil, nil
 }
 
@@ -36,7 +67,7 @@ func (db MockDB) GetBuilderSubmissions(filters GetBuilderSubmissionsFilters) ([]
 	return nil, nil
 }
 
-func (db MockDB) SaveDeliveredPayload(slot uint64, proposerPubkey types.PubkeyHex, blockHash types.Hash, signedBlindedBeaconBlock *types.SignedBlindedBeaconBlock) error {
+func (db MockDB) SaveDeliveredPayload(bidTrace *common.BidTraceV2, signedBlindedBeaconBlock *types.SignedBlindedBeaconBlock) error {
 	return nil
 }
 

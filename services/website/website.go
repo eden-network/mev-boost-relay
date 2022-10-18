@@ -2,6 +2,7 @@
 package website
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/NYTimes/gziphandler"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/flashbots/go-utils/httplogger"
 	"github.com/flashbots/mev-boost-relay/common"
@@ -17,21 +19,12 @@ import (
 	"github.com/go-redis/redis/v9"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
+	"github.com/tdewolff/minify"
+	"github.com/tdewolff/minify/html"
 	uberatomic "go.uber.org/atomic"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
-	"golang.org/x/text/message"
 )
 
 var ErrServerAlreadyStarted = errors.New("server was already started")
-
-var (
-	// Printer for pretty printing numbers
-	printer = message.NewPrinter(language.English)
-
-	// Caser is used for casing strings
-	caser = cases.Title(language.English)
-)
 
 type WebserverOpts struct {
 	ListenAddress  string
@@ -40,6 +33,11 @@ type WebserverOpts struct {
 	Redis          *datastore.RedisCache
 	DB             *database.DatabaseService
 	Log            *logrus.Entry
+
+	ShowConfigDetails bool
+	LinkBeaconchain   string
+	LinkEtherscan     string
+	RelayURL          string
 }
 
 type Webserver struct {
@@ -52,38 +50,62 @@ type Webserver struct {
 	srv        *http.Server
 	srvStarted uberatomic.Bool
 
-	indexTemplate      *template.Template
-	statusHTMLData     StatusHTMLData
-	statusHTMLDataLock sync.RWMutex
+	indexTemplate    *template.Template
+	statusHTMLData   StatusHTMLData
+	rootResponseLock sync.RWMutex
+
+	htmlDefault     *[]byte
+	htmlByValueDesc *[]byte
+	htmlByValueAsc  *[]byte
+
+	minifier *minify.M
 }
 
 func NewWebserver(opts *WebserverOpts) (*Webserver, error) {
 	var err error
+
+	minifier := minify.New()
+	minifier.AddFunc("text/css", html.Minify)
+	minifier.AddFunc("text/html", html.Minify)
+
 	server := &Webserver{
 		opts:  opts,
 		log:   opts.Log,
 		redis: opts.Redis,
 		db:    opts.DB,
+
+		htmlDefault:     &[]byte{},
+		htmlByValueDesc: &[]byte{},
+		htmlByValueAsc:  &[]byte{},
+
+		minifier: minifier,
 	}
 
-	server.indexTemplate, err = parseIndexTemplate()
+	server.indexTemplate, err = ParseIndexTemplate()
 	if err != nil {
 		return nil, err
 	}
 
 	server.statusHTMLData = StatusHTMLData{
-		Network:                     caser.String(opts.NetworkDetails.Name),
+		Network:                     opts.NetworkDetails.Name,
 		RelayPubkey:                 opts.RelayPubkeyHex,
-		ValidatorsTotal:             "",
-		ValidatorsRegistered:        "",
+		ValidatorsActive:            0,
+		ValidatorsTotal:             0,
+		ValidatorsRegistered:        0,
 		BellatrixForkVersion:        opts.NetworkDetails.BellatrixForkVersionHex,
 		GenesisForkVersion:          opts.NetworkDetails.GenesisForkVersionHex,
 		GenesisValidatorsRoot:       opts.NetworkDetails.GenesisValidatorsRootHex,
 		BuilderSigningDomain:        hexutil.Encode(opts.NetworkDetails.DomainBuilder[:]),
 		BeaconProposerSigningDomain: hexutil.Encode(opts.NetworkDetails.DomainBeaconProposer[:]),
-		HeadSlot:                    "",
-		NumPayloadsDelivered:        "",
+		HeadSlot:                    0,
+		NumPayloadsDelivered:        0,
 		Payloads:                    []*database.DeliveredPayloadEntry{},
+		ValueLink:                   "",
+		ValueOrderIcon:              "",
+		ShowConfigDetails:           opts.ShowConfigDetails,
+		LinkBeaconchain:             opts.LinkBeaconchain,
+		LinkEtherscan:               opts.LinkEtherscan,
+		RelayURL:                    opts.RelayURL,
 	}
 
 	return server, nil
@@ -97,8 +119,8 @@ func (srv *Webserver) StartServer() (err error) {
 	// Start background task to regularly update status HTML data
 	go func() {
 		for {
-			srv.updateStatusHTMLData()
-			time.Sleep(5 * time.Second)
+			srv.updateHTML()
+			time.Sleep(10 * time.Second)
 		}
 	}()
 
@@ -124,21 +146,32 @@ func (srv *Webserver) getRouter() http.Handler {
 	r.HandleFunc("/", srv.handleRoot).Methods(http.MethodGet)
 	r.HandleFunc("/info", srv.handleRoot).Methods(http.MethodGet)
 	loggedRouter := httplogger.LoggingMiddlewareLogrus(srv.log, r)
-	return loggedRouter
+	withGz := gziphandler.GzipHandler(loggedRouter)
+	return withGz
 }
 
-func (srv *Webserver) updateStatusHTMLData() {
-	knownValidators, err := srv.redis.GetKnownValidators()
-	if err != nil {
-		srv.log.WithError(err).Error("error getting known validators in updateStatusHTMLData")
-	}
-
-	_numRegistered, err := srv.redis.NumRegisteredValidators()
+func (srv *Webserver) updateHTML() {
+	_numRegistered, err := srv.db.NumRegisteredValidators()
 	if err != nil {
 		srv.log.WithError(err).Error("error getting number of registered validators in updateStatusHTMLData")
 	}
 
+	_activeVals, err := srv.redis.GetActiveValidators()
+	if err != nil {
+		srv.log.WithError(err).Error("error getting active validators in updateStatusHTMLData")
+	}
+
 	payloads, err := srv.db.GetRecentDeliveredPayloads(database.GetPayloadsFilters{Limit: 30})
+	if err != nil {
+		srv.log.WithError(err).Error("error getting recent payloads")
+	}
+
+	payloadsByValueDesc, err := srv.db.GetRecentDeliveredPayloads(database.GetPayloadsFilters{Limit: 30, OrderByValue: -1})
+	if err != nil {
+		srv.log.WithError(err).Error("error getting recent payloads")
+	}
+
+	payloadsByValueAsc, err := srv.db.GetRecentDeliveredPayloads(database.GetPayloadsFilters{Limit: 30, OrderByValue: 1})
 	if err != nil {
 		srv.log.WithError(err).Error("error getting recent payloads")
 	}
@@ -153,28 +186,86 @@ func (srv *Webserver) updateStatusHTMLData() {
 		srv.log.WithError(err).Error("error getting latest slot")
 	}
 	_latestSlotInt, _ := strconv.ParseUint(_latestSlot, 10, 64)
+	if len(payloads) > 0 && payloads[0].Slot > _latestSlotInt {
+		_latestSlotInt = payloads[0].Slot
+	}
 
-	numRegistered := printer.Sprintf("%d", _numRegistered)
-	numKnown := printer.Sprintf("%d", len(knownValidators))
-	numPayloads := printer.Sprintf("%d", _numPayloadsDelivered)
-	latestSlot := printer.Sprintf("%d", _latestSlotInt)
+	_validatorsTotal, err := srv.redis.GetStats(datastore.RedisStatsFieldValidatorsTotal)
+	if err != nil && !errors.Is(err, redis.Nil) {
+		srv.log.WithError(err).Error("error getting latest stats: validators_total")
+	}
+	_validatorsTotalInt, _ := strconv.ParseUint(_validatorsTotal, 10, 64)
 
-	srv.statusHTMLDataLock.Lock()
-	srv.statusHTMLData.ValidatorsTotal = numKnown
-	srv.statusHTMLData.ValidatorsRegistered = numRegistered
+	srv.statusHTMLData.ValidatorsTotal = _validatorsTotalInt
+	srv.statusHTMLData.ValidatorsRegistered = _numRegistered
+	srv.statusHTMLData.ValidatorsActive = uint64(len(_activeVals))
+	srv.statusHTMLData.NumPayloadsDelivered = _numPayloadsDelivered
+	srv.statusHTMLData.HeadSlot = _latestSlotInt
+
+	// Now generate the HTML
+	htmlDefault := bytes.Buffer{}
+	htmlByValueDesc := bytes.Buffer{}
+	htmlByValueAsc := bytes.Buffer{}
+
+	// default view
 	srv.statusHTMLData.Payloads = payloads
-	srv.statusHTMLData.HeadSlot = latestSlot
-	srv.statusHTMLData.NumPayloadsDelivered = numPayloads
-	srv.statusHTMLDataLock.Unlock()
+	srv.statusHTMLData.ValueLink = "/info?order_by=-value"
+	srv.statusHTMLData.ValueOrderIcon = ""
+	if err := srv.indexTemplate.Execute(&htmlDefault, srv.statusHTMLData); err != nil {
+		srv.log.WithError(err).Error("error rendering template")
+	}
+
+	// descending order view
+	srv.statusHTMLData.Payloads = payloadsByValueDesc
+	srv.statusHTMLData.ValueLink = "/info?order_by=value"
+	srv.statusHTMLData.ValueOrderIcon = " <svg style=\"width:12px;\" xmlns=\"http://www.w3.org/2000/svg\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\" class=\"w-6 h-6\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M19.5 13.5L12 21m0 0l-7.5-7.5M12 21V3\" /></svg>"
+	if err := srv.indexTemplate.Execute(&htmlByValueDesc, srv.statusHTMLData); err != nil {
+		srv.log.WithError(err).Error("error rendering template (by value)")
+	}
+
+	// ascending order view
+	srv.statusHTMLData.Payloads = payloadsByValueAsc
+	srv.statusHTMLData.ValueLink = "/info"
+	srv.statusHTMLData.ValueOrderIcon = " <svg style=\"width:12px;\" xmlns=\"http://www.w3.org/2000/svg\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\" class=\"w-6 h-6\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M4.5 10.5L12 3m0 0l7.5 7.5M12 3v18\" /></svg>"
+	if err := srv.indexTemplate.Execute(&htmlByValueAsc, srv.statusHTMLData); err != nil {
+		srv.log.WithError(err).Error("error rendering template (by -value)")
+	}
+
+	// Minify
+	htmlDefaultBytes, err := srv.minifier.Bytes("text/html", htmlDefault.Bytes())
+	if err != nil {
+		srv.log.WithError(err).Error("error minifying htmlDefault")
+	}
+	htmlValueDescBytes, err := srv.minifier.Bytes("text/html", htmlByValueDesc.Bytes())
+	if err != nil {
+		srv.log.WithError(err).Error("error minifying htmlByValueDesc")
+	}
+	htmlValueDescAsc, err := srv.minifier.Bytes("text/html", htmlByValueAsc.Bytes())
+	if err != nil {
+		srv.log.WithError(err).Error("error minifying htmlByValueAsc")
+	}
+
+	// Swap the html pointers
+	srv.rootResponseLock.Lock()
+	srv.htmlDefault = &htmlDefaultBytes
+	srv.htmlByValueDesc = &htmlValueDescBytes
+	srv.htmlByValueAsc = &htmlValueDescAsc
+	srv.rootResponseLock.Unlock()
 }
 
 func (srv *Webserver) handleRoot(w http.ResponseWriter, req *http.Request) {
-	srv.statusHTMLDataLock.RLock()
-	defer srv.statusHTMLDataLock.RUnlock()
+	var err error
 
-	if err := srv.indexTemplate.Execute(w, srv.statusHTMLData); err != nil {
-		srv.log.WithError(err).Error("error rendering index template")
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
+	srv.rootResponseLock.RLock()
+	defer srv.rootResponseLock.RUnlock()
+	if req.URL.Query().Get("order_by") == "-value" {
+		_, err = w.Write(*srv.htmlByValueDesc)
+	} else if req.URL.Query().Get("order_by") == "value" {
+		_, err = w.Write(*srv.htmlByValueAsc)
+	} else {
+		_, err = w.Write(*srv.htmlDefault)
+	}
+	if err != nil {
+		srv.log.WithError(err).Error("error writing template")
 	}
 }

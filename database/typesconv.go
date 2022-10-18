@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 
 	"github.com/flashbots/go-boost-utils/types"
+	"github.com/flashbots/mev-boost-relay/common"
 )
 
 func PayloadToExecPayloadEntry(payload *types.BuilderSubmitBlockRequest) (*ExecutionPayloadEntry, error) {
@@ -20,4 +21,39 @@ func PayloadToExecPayloadEntry(payload *types.BuilderSubmitBlockRequest) (*Execu
 		Version: "bellatrix",
 		Payload: string(_payload),
 	}, nil
+}
+
+func DeliveredPayloadEntryToBidTraceV2JSON(payload *DeliveredPayloadEntry) common.BidTraceV2JSON {
+	return common.BidTraceV2JSON{
+		Slot:                 payload.Slot,
+		ParentHash:           payload.ParentHash,
+		BlockHash:            payload.BlockHash,
+		BuilderPubkey:        payload.BuilderPubkey,
+		ProposerPubkey:       payload.ProposerPubkey,
+		ProposerFeeRecipient: payload.ProposerFeeRecipient,
+		GasLimit:             payload.GasLimit,
+		GasUsed:              payload.GasUsed,
+		Value:                payload.Value,
+		NumTx:                payload.NumTx,
+		BlockNumber:          payload.BlockNumber,
+	}
+}
+
+func BuilderSubmissionEntryToBidTraceV2WithTimestampJSON(payload *BuilderBlockSubmissionEntry) common.BidTraceV2WithTimestampJSON {
+	return common.BidTraceV2WithTimestampJSON{
+		Timestamp: payload.InsertedAt.Unix(),
+		BidTraceV2JSON: common.BidTraceV2JSON{
+			Slot:                 payload.Slot,
+			ParentHash:           payload.ParentHash,
+			BlockHash:            payload.BlockHash,
+			BuilderPubkey:        payload.BuilderPubkey,
+			ProposerPubkey:       payload.ProposerPubkey,
+			ProposerFeeRecipient: payload.ProposerFeeRecipient,
+			GasLimit:             payload.GasLimit,
+			GasUsed:              payload.GasUsed,
+			Value:                payload.Value,
+			NumTx:                payload.NumTx,
+			BlockNumber:          payload.BlockNumber,
+		},
+	}
 }

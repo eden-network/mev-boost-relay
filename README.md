@@ -28,10 +28,13 @@ See also:
 
 - [Background](#background)
 - [Usage](#usage)
+- [Technical notes](#technical-notes)
 - [Maintainers](#maintainers)
 - [Contributing](#contributing)
 - [Security](#security)
 - [License](#license)
+
+---
 
 # Background
 
@@ -44,6 +47,8 @@ The mev-boost relay is a trusted mediator between block producers and block buil
 In the future, [proposer/builder separation](https://ethresear.ch/t/two-slot-proposer-builder-separation/10980) will be enshrined in the Ethereum protocol itself to further harden its trust model.
 
 Read more in [Why run mev-boost?](https://writings.flashbots.net/writings/why-run-mevboost/) and in the [Frequently Asked Questions](https://github.com/flashbots/mev-boost/wiki/Frequently-Asked-Questions).
+
+---
 
 # Usage
 
@@ -68,13 +73,13 @@ Now start the services:
 
 ```bash
 # The housekeeper sets up the validators, and does various housekeeping
-go run . housekeeper --network kiln --db postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+go run . housekeeper --network sepolia --db postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
 
-# Run APIs for Kiln (using a dummy BLS secret key)
-go run . api --network kiln --secret-key 0x607a11b45a7219cc61a3d9c5fd08c7eebd602a6a19a977f8d3771d5711a550f2 --db postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+# Run APIs for sepolia (using a dummy BLS secret key)
+go run . api --network sepolia --secret-key 0x607a11b45a7219cc61a3d9c5fd08c7eebd602a6a19a977f8d3771d5711a550f2 --db postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
 
-# Run Website for Kiln
-go run . website --network kiln --db postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+# Run Website for sepolia
+go run . website --network sepolia --db postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
 
 # Query status
 curl localhost:9062/eth/v1/builder/status
@@ -83,18 +88,61 @@ curl localhost:9062/eth/v1/builder/status
 curl -X POST localhost:9062/eth/v1/builder/validators -d @testdata/valreg2.json
 
 # Delete previous registrations
-redis-cli DEL boost-relay/kiln:validators-registration boost-relay/kiln:validators-registration-timestamp
+redis-cli DEL boost-relay/sepolia:validators-registration boost-relay/sepolia:validators-registration-timestamp
 ```
 
-Env vars:
+
+### Environment variables
 
 * `DB_TABLE_PREFIX` - prefix to use for db tables (default uses `dev`)
 * `DB_DONT_APPLY_SCHEMA` - disable applying DB schema on startup (useful for connecting data API to read-only replica)
 * `BLOCKSIM_MAX_CONCURRENT` - maximum number of concurrent block-sim requests (0 for no maximum)
 * `FORCE_GET_HEADER_204` - force 204 as getHeader response
 * `DISABLE_BLOCK_PUBLISHING` - disable publishing blocks to the beacon node at the end of getPayload
+* `DISABLE_LOWPRIO_BUILDERS` - reject block submissions by low-prio builders
 * `DISABLE_BID_MEMORY_CACHE` - disable bids to go through in-memory cache. forces to go through redis/db
-* `DISABLE_BID_REDIS_CACHE` - disable bids to go through redis cache. forces to go through memory/db
+* `NUM_ACTIVE_VALIDATOR_PROCESSORS` - proposer API - number of goroutines to listen to the active validators channel
+* `NUM_VALIDATOR_REG_PROCESSORS` - proposer API - number of goroutines to listen to the validator registration channel
+* `ACTIVE_VALIDATOR_HOURS` - number of hours to track active proposers in redis (default: 3)
+* `GETPAYLOAD_RETRY_TIMEOUT_MS` - getPayload retry getting a payload if first try failed (default: 100)
+
+### Updating the website
+
+* Edit the HTML in `services/website/website.html`
+* Edit template values in `testdata/website-htmldata.json`
+* Generate a static version of the website with `go run scripts/website-staticgen/main.go`
+
+This builds a local copy of the template and saves it in `website-index.html`
+
+The website is using:
+* [PureCSS](https://purecss.io/)
+* [Font Awesome](https://fontawesome.com/docs) [icons](https://fontawesome.com/icons)
+
+---
+
+# Technical Notes
+
+### System startup sequence (housekeeper)
+
+First the housekeeper updates Redis with the main information for the API:
+1. Update known validators in Redis (source: beacon node)
+1. Update proposer duties in Redis (source: beacon node (duties) + Redis (validator registrations))
+1. Update validator registrations in Redis (source: database)
+1. Update builder status in Redis (source: database)
+
+Then the API can start and function.
+
+Aftwareds, there's important ongoing, regular housekeeper tasks:
+
+1. Update known validators and proposer duties in Redis
+2. Update active validators in database (source: Redis)
+
+
+### Tradeoffs
+
+- Validator registrations in are only saved to the database if `feeRecipient` changes. If a registration has a newer timestamp but same `feeRecipient` it is not saved, to avoid filling up the database with unnecessary data. (Some CL clients create a new validator registration every epoch, not just if the `feeRecipient` changes, as was the original idea).
+
+---
 
 # Maintainers
 
