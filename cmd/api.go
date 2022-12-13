@@ -47,6 +47,7 @@ func init() {
 
 	apiCmd.Flags().StringVar(&apiListenAddr, "listen-addr", apiDefaultListenAddr, "listen address for webserver")
 	apiCmd.Flags().StringSliceVar(&beaconNodeURIs, "beacon-uris", defaultBeaconURIs, "beacon endpoints")
+	apiCmd.Flags().StringSliceVar(&whitelistedBuilderPubKeys, "builder-whitelist", defaultBuilderWhitelist, "whitelisted builders")
 	apiCmd.Flags().StringVar(&redisURI, "redis-uri", defaultRedisURI, "redis uri")
 	apiCmd.Flags().StringVar(&postgresDSN, "db", defaultPostgresDSN, "PostgreSQL DSN")
 	apiCmd.Flags().StringVar(&apiSecretKey, "secret-key", apiDefaultSecretKey, "secret key for signing bids")
@@ -136,6 +137,12 @@ var apiCmd = &cobra.Command{
 			}
 		}
 
+		var whitelistedBuilders = make(map[string]bool)
+		log.Infof("Whitelisted builders: %s", strings.Join(whitelistedBuilderPubKeys, ", "))
+		for _, pubkey := range whitelistedBuilderPubKeys {
+			whitelistedBuilders[pubkey] = true
+		}
+
 		opts := api.RelayAPIOpts{
 			Log:           log,
 			ListenAddr:    apiListenAddr,
@@ -151,6 +158,8 @@ var apiCmd = &cobra.Command{
 			DataAPI:         true,
 			InternalAPI:     apiInternalAPI,
 			PprofAPI:        apiPprofEnabled,
+
+			BuilderWhitelist: whitelistedBuilders,
 		}
 
 		// Decode the private key

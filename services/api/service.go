@@ -89,6 +89,8 @@ type RelayAPIOpts struct {
 	DataAPI         bool
 	PprofAPI        bool
 	InternalAPI     bool
+
+	BuilderWhitelist map[string]bool
 }
 
 // RelayAPI represents a single Relay instance
@@ -127,6 +129,9 @@ type RelayAPI struct {
 	ffForceGetHeader204      bool
 	ffDisableBlockPublishing bool
 	ffDisableLowPrioBuilders bool
+
+	// Whitelisted builders
+	builderWhitelist map[string]bool
 }
 
 // NewRelayAPI creates a new service. if builders is nil, allow any builder
@@ -185,6 +190,8 @@ func NewRelayAPI(opts RelayAPIOpts) (api *RelayAPI, err error) {
 
 		activeValidatorC: make(chan types.PubkeyHex, 450_000),
 		validatorRegC:    make(chan types.SignedValidatorRegistration, 450_000),
+
+		builderWhitelist: opts.BuilderWhitelist,
 	}
 
 	if os.Getenv("FORCE_GET_HEADER_204") == "1" {
@@ -918,14 +925,7 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 		return
 	}
 
-	whitelistedBuilders := map[string]bool{
-		"0xa5eec32c40cc3737d643c24982c7f097354150aac1612d4089e2e8af44dbeefaec08a11c76bd57e7d58697ad8b2bbef5": true,
-		"0x8e39849ceabc8710de49b2ca7053813de18b1c12d9ee22149dac4b90b634dd7e6d1e7d3c2b4df806ce32c6228eb70a8b": true,
-		"0x8931ae674d7b9b0165b784a13301bcc102f70faf4576ec3dc4a31949dde831ec60e79444ed911742fa7b4720691d1e45": true,
-		"0xb1d229d9c21298a87846c7022ebeef277dfc321fe674fa45312e20b5b6c400bfde9383f801848d7837ed5fc449083a12": true,
-	}
-
-	if !whitelistedBuilders[payload.Message.BuilderPubkey.String()] {
+	if !api.builderWhitelist[payload.Message.BuilderPubkey.String()] {
 		log.Info("builder is not on whitelist: ", payload.Message.BuilderPubkey.String())
 		time.Sleep(200 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
