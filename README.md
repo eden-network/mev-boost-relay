@@ -1,26 +1,33 @@
-# mev-boost Relay
+# MEV-Boost Relay
 
 [![Goreport status](https://goreportcard.com/badge/github.com/flashbots/mev-boost-relay)](https://goreportcard.com/report/github.com/flashbots/mev-boost-relay)
 [![Test status](https://github.com/flashbots/mev-boost-relay/workflows/Checks/badge.svg)](https://github.com/flashbots/mev-boost-relay/actions?query=workflow%3A%22Checks%22)
 
-Flashbots mev-boost relay for proposer/builder separation in Ethereum.
+MEV-Boost Relay for Ethereum proposer/builder separation (PBS).
 
-Provides the builder-specs API for Ethereum proof-of-stake validators, an API for block builders to submit blocks, as well as a data API, as running for [Goerli](https://builder-relay-goerli.flashbots.net/) and the other test networks.
+Currently live at:
+
+* https://relay.edennetwork.io/info (also on [Goerli](https://goerli.edennetwork.io/info))
 
 The relay consists of several components that are designed to run and scale independently and to be as simple as possible:
 
-1. [Housekeeper](https://github.com/flashbots/mev-boost-relay/tree/main/services/housekeeper): update known validators, proposer duties.
-2. [API](https://github.com/flashbots/mev-boost-relay/tree/main/services/api): for proposer, block builder, data.
-3. [Website](https://github.com/flashbots/mev-boost-relay/tree/main/services/website): handles the root website requests (information is pulled from Redis and database).
+1. [API](https://github.com/eden-network/mev-boost-relay/tree/main/services/api): for proposer, block builder, data.
+1. [Website](https://github.com/eden-network/mev-boost-relay/tree/main/services/website): handles the root website requests (information is pulled from Redis and database).
+1. [Housekeeper](https://github.com/eden-network/mev-boost-relay/tree/main/services/housekeeper): update known validators, proposer duties.
 
-This software is currently in **alpha state**, and slowly stabilizing. There may still be significant changes.
+Dependencies:
 
-See also:
+1. Redis
+1. PostgreSQL
+1. one or more beacon nodes
+1. block submission validation nodes
 
-* [Relay API docs](https://flashbots.notion.site/Relay-API-Spec-5fb0819366954962bc02e81cb33840f5)
-* [Docker images](https://hub.docker.com/r/flashbots/mev-boost-relay)
-* [Mainnet relay](https://boost-relay.flashbots.net)
+**See also:**
+
+* [Docker images](https://hub.docker.com/r/edennetwork/builder-relay)
 * [mev-boost](https://github.com/flashbots/mev-boost)
+* [Relay API specs](https://flashbots.github.io/relay-specs)
+* [Guide for running mev-boost-relay at scale](https://flashbots.notion.site/Running-mev-boost-relay-at-scale-draft-4040ccd5186c425d9a860cbb29bbfe09)
 
 ---
 
@@ -40,8 +47,6 @@ See also:
 
 MEV is a centralizing force on Ethereum. Unattended, the competition for MEV opportunities leads to consensus security instability and permissioned communication infrastructure between traders and block producers. This erodes neutrality, transparency, decentralization, and permissionlessness.
 
-Flashbots is a research and development organization working on mitigating the negative externalities of MEV. Flashbots started as a builder specializing in MEV extraction in proof-of-work Ethereum to democratize access to MEV and make the most profitable blocks available to all miners. >90% of miners are outsourcing some of their block construction to Flashbots today.
-
 The mev-boost relay is a trusted mediator between block producers and block builders. It enables all Ethereum proof-of-stake validators to offer their blockspace to not just Flashbots but other builders as well. This opens up the market to more builders and creates competition between them, leading to more revenue and choice for validators, and better censorship-resistance for Ethereum.
 
 In the future, [proposer/builder separation](https://ethresear.ch/t/two-slot-proposer-builder-separation/10980) will be enshrined in the Ethereum protocol itself to further harden its trust model.
@@ -53,17 +58,20 @@ Read more in [Why run mev-boost?](https://writings.flashbots.net/writings/why-ru
 # Usage
 
 ```bash
-# Start PostgreSQL & Redis in Docker
-docker-compose up
+# Start PostgreSQL & Redis individually:
+docker run -d -p 5432:5432 -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres postgres
+docker run -d -p 6379:6379 redis
 
-# Or start services individually:
-docker run -p 5432:5432 -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres postgres
-docker run -p 6379:6379 redis
+# Or with docker-compose:
+docker-compose up
 ```
 
-Note: this also runs an Adminer (a web frontend for Postgres) on http://localhost:8093/?username=postgres (db: `postgres`, username: `postgres`, password: `postgres`)
+Note: docker-compose also runs an Adminer (a web frontend for Postgres) on http://localhost:8093/?username=postgres (db: `postgres`, username: `postgres`, password: `postgres`)
 
-The services need access to a beacon node for event subscriptions. You can also specify multiple beacon nodes by providing a comma separated list of beacon node URIs. The beacon API by default is using `localhost:3500` (the Prysm default beacon-API port). You can proxy the port from a server like this:
+The services need access to a beacon node for event subscriptions. You can also specify multiple beacon nodes by providing a comma separated list of beacon node URIs.
+The beacon API by default is using `localhost:3500` (the Prysm default beacon-API port).
+
+You can proxy the beacon-API port (eg. 3500 for Prysm) from a server like this:
 
 ```bash
 ssh -L 3500:localhost:3500 your_server
@@ -116,43 +124,25 @@ This builds a local copy of the template and saves it in `website-index.html`
 
 The website is using:
 * [PureCSS](https://purecss.io/)
+* [HeroIcons](https://heroicons.com/)
 * [Font Awesome](https://fontawesome.com/docs) [icons](https://fontawesome.com/icons)
 
 ---
 
 # Technical Notes
 
-### System startup sequence (housekeeper)
-
-First the housekeeper updates Redis with the main information for the API:
-1. Update known validators in Redis (source: beacon node)
-1. Update proposer duties in Redis (source: beacon node (duties) + Redis (validator registrations))
-1. Update validator registrations in Redis (source: database)
-1. Update builder status in Redis (source: database)
-
-Then the API can start and function.
-
-Aftwareds, there's important ongoing, regular housekeeper tasks:
-
-1. Update known validators and proposer duties in Redis
-2. Update active validators in database (source: Redis)
-
-
-### Tradeoffs
-
-- Validator registrations in are only saved to the database if `feeRecipient` changes. If a registration has a newer timestamp but same `feeRecipient` it is not saved, to avoid filling up the database with unnecessary data. (Some CL clients create a new validator registration every epoch, not just if the `feeRecipient` changes, as was the original idea).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for more technical details!
 
 ---
 
 # Maintainers
 
-- [@metachris](https://github.com/metachris)
+- [@chpiatt](https://twitter.com.chpiatt)
+- [@metachris](https://twitter.com/metachris)
+- [@Ruteri](https://twitter.com/mmrosum)
+- [@avalonche](https://github.com/avalonche)
 
 # Contributing
-
-[Flashbots](https://flashbots.net) is a research and development collective working on mitigating the negative externalities of decentralized economies. We contribute with the larger free software community to illuminate the dark forest.
-
-You are welcome here <3.
 
 - If you have a question, feedback or a bug report for this project, please [open a new Issue](https://github.com/flashbots/mev-boost/issues).
 - If you would like to contribute with code, check the [CONTRIBUTING file](CONTRIBUTING.md) for further info about the development environment.
@@ -165,7 +155,3 @@ If you find a security vulnerability on this project or any other initiative rel
 # License
 
 The code in this project is free software under the [AGPL License version 3 or later](LICENSE).
-
----
-
-Made with ☀️ by the ⚡🤖 collective.

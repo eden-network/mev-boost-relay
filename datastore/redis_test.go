@@ -2,6 +2,7 @@ package datastore
 
 import (
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/flashbots/go-boost-utils/types"
@@ -163,4 +164,95 @@ func TestActiveValidators(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, len(vals))
 	require.True(t, vals[pk1])
+}
+
+func _buildGetHeaderResponse(value uint64) *types.GetHeaderResponse {
+	return &types.GetHeaderResponse{
+		Version: "bellatrix",
+		Data: &types.SignedBuilderBid{
+			Message: &types.BuilderBid{
+				Header: &types.ExecutionPayloadHeader{},
+				Value:  types.IntToU256(value),
+				Pubkey: types.PublicKey{0x01},
+			},
+			Signature: types.Signature{0x01},
+		},
+	}
+}
+
+func TestBuilderBids(t *testing.T) {
+	cache := setupTestRedis(t)
+
+	slot := uint64(123)
+	parentHash := "0xa1"
+	proposerPk := "0xa2"
+	builder1pk := "0xb1"
+	builder2pk := "0xb2"
+	builder3pk := "0xb3"
+
+	receivedAt := time.Now()
+
+	// 2 initial bids: 99 and 100 value
+	err := cache.SaveLatestBuilderBid(slot, builder1pk, parentHash, proposerPk, receivedAt, _buildGetHeaderResponse(100))
+	require.NoError(t, err)
+	err = cache.SaveLatestBuilderBid(slot, builder2pk, parentHash, proposerPk, receivedAt, _buildGetHeaderResponse(99))
+	require.NoError(t, err)
+	err = cache.UpdateTopBid(slot, parentHash, proposerPk)
+	require.NoError(t, err)
+	topBid, err := cache.GetBestBid(slot, parentHash, proposerPk)
+	require.NoError(t, err)
+	require.Equal(t, "100", topBid.Data.Message.Value.String())
+
+	// new top bid by builder3: 101
+	err = cache.SaveLatestBuilderBid(slot, builder3pk, parentHash, proposerPk, receivedAt, _buildGetHeaderResponse(101))
+	require.NoError(t, err)
+	err = cache.UpdateTopBid(slot, parentHash, proposerPk)
+	require.NoError(t, err)
+	topBid, err = cache.GetBestBid(slot, parentHash, proposerPk)
+	require.NoError(t, err)
+	require.Equal(t, "101", topBid.Data.Message.Value.String())
+
+	// builder3 cancels 101 bid, by sending 100 value
+	err = cache.SaveLatestBuilderBid(slot, builder3pk, parentHash, proposerPk, receivedAt, _buildGetHeaderResponse(99))
+	require.NoError(t, err)
+	err = cache.UpdateTopBid(slot, parentHash, proposerPk)
+	require.NoError(t, err)
+	topBid, err = cache.GetBestBid(slot, parentHash, proposerPk)
+	require.NoError(t, err)
+	require.Equal(t, "100", topBid.Data.Message.Value.String())
+
+	// double-check the receivedAt timestamp
+	ts, err := cache.GetBuilderLatestPayloadReceivedAt(slot, builder3pk, parentHash, proposerPk)
+	require.NoError(t, err)
+	require.Equal(t, receivedAt.UnixMilli(), ts)
+}
+
+func TestRedisURIs(t *testing.T) {
+	t.Helper()
+	var err error
+
+	redisTestServer, err := miniredis.Run()
+	require.NoError(t, err)
+
+	// test connection with and without protocol
+	_, err = NewRedisCache(redisTestServer.Addr(), "")
+	require.NoError(t, err)
+	_, err = NewRedisCache("redis://"+redisTestServer.Addr(), "")
+	require.NoError(t, err)
+
+	// test connection w/ credentials
+	username := "user"
+	password := "pass"
+	redisTestServer.RequireUserAuth(username, password)
+	fullURL := "redis://" + username + ":" + password + "@" + redisTestServer.Addr()
+	_, err = NewRedisCache(fullURL, "")
+	require.NoError(t, err)
+
+	// ensure malformed URL throws error
+	malformURL := "http://" + username + ":" + password + "@" + redisTestServer.Addr()
+	_, err = NewRedisCache(malformURL, "")
+	require.Error(t, err)
+	malformURL = "redis://" + username + ":" + "wrongpass" + "@" + redisTestServer.Addr()
+	_, err = NewRedisCache(malformURL, "")
+	require.Error(t, err)
 }

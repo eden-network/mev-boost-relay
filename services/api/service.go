@@ -2,6 +2,7 @@
 package api
 
 import (
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -27,6 +28,7 @@ import (
 	"github.com/flashbots/mev-boost-relay/common"
 	"github.com/flashbots/mev-boost-relay/database"
 	"github.com/flashbots/mev-boost-relay/datastore"
+	"github.com/go-redis/redis/v9"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 	uberatomic "go.uber.org/atomic"
@@ -93,6 +95,11 @@ type RelayAPIOpts struct {
 	BuilderWhitelist map[string]bool
 }
 
+type randaoHelper struct {
+	slot       uint64
+	prevRandao string
+}
+
 // RelayAPI represents a single Relay instance
 type RelayAPI struct {
 	opts RelayAPIOpts
@@ -109,7 +116,8 @@ type RelayAPI struct {
 	redis        *datastore.RedisCache
 	db           database.IDatabaseService
 
-	headSlot uberatomic.Uint64
+	headSlot    uberatomic.Uint64
+	genesisInfo *beaconclient.GetGenesisResponse
 
 	proposerDutiesLock       sync.RWMutex
 	proposerDutiesResponse   []types.BuilderGetValidatorsResponseEntry
@@ -132,6 +140,10 @@ type RelayAPI struct {
 
 	// Whitelisted builders
 	builderWhitelist map[string]bool
+
+	expectedPrevRandao         randaoHelper
+	expectedPrevRandaoLock     sync.RWMutex
+	expectedPrevRandaoUpdating uint64
 }
 
 // NewRelayAPI creates a new service. if builders is nil, allow any builder
@@ -271,6 +283,12 @@ func (api *RelayAPI) StartServer() (err error) {
 		return err
 	}
 
+	api.genesisInfo, err = api.beaconClient.GetGenesis()
+	if err != nil {
+		return err
+	}
+	api.log.Infof("genesis info: %d", api.genesisInfo.Data.GenesisTime)
+
 	// start things for the block-builder API
 	if api.opts.BlockBuilderAPI {
 		// Get current proposer duties blocking before starting, to have them ready
@@ -305,15 +323,6 @@ func (api *RelayAPI) StartServer() (err error) {
 		for {
 			headEvent := <-c
 			api.processNewSlot(headEvent.Slot)
-		}
-	}()
-
-	// Periodically remove expired headers
-	go func() {
-		for {
-			time.Sleep(2 * time.Minute)
-			numRemoved, numRemaining := api.datastore.CleanupOldBidsAndBlocks(api.headSlot.Load())
-			api.log.Infof("Removed %d old bids and blocks. Remaining: %d", numRemoved, numRemaining)
 		}
 	}()
 
@@ -369,7 +378,12 @@ func (api *RelayAPI) startValidatorRegistrationDBProcessor() {
 	for valReg := range api.validatorRegC {
 		err := api.datastore.SaveValidatorRegistration(valReg)
 		if err != nil {
-			api.log.WithError(err).WithField("proposerPubkey", valReg.Message.Pubkey.String()).Infof("error saving validator registration")
+			api.log.WithError(err).WithFields(logrus.Fields{
+				"reg_pubkey":       valReg.Message.Pubkey,
+				"reg_feeRecipient": valReg.Message.FeeRecipient,
+				"reg_gasLimit":     valReg.Message.GasLimit,
+				"reg_timestamp":    valReg.Message.Timestamp,
+			}).Error("error saving validator registration")
 		}
 	}
 }
@@ -386,18 +400,25 @@ func (api *RelayAPI) processNewSlot(headSlot uint64) {
 		}
 	}
 
+	// store the head slot
 	api.headSlot.Store(headSlot)
+
+	// only for builder-api
+	if api.opts.BlockBuilderAPI {
+		// query the expected prev_randao field
+		go api.updatedExpectedRandao(headSlot)
+
+		// update proposer duties in the background
+		go api.updateProposerDuties(headSlot)
+	}
+
+	// log
 	epoch := headSlot / uint64(common.SlotsPerEpoch)
 	api.log.WithFields(logrus.Fields{
 		"epoch":              epoch,
 		"slotHead":           headSlot,
 		"slotStartNextEpoch": (epoch + 1) * uint64(common.SlotsPerEpoch),
 	}).Infof("updated headSlot to %d", headSlot)
-
-	if api.opts.BlockBuilderAPI {
-		// Update proposer duties in the background
-		go api.updateProposerDuties(headSlot)
-	}
 }
 
 func (api *RelayAPI) updateProposerDuties(headSlot uint64) {
@@ -581,7 +602,7 @@ func (api *RelayAPI) handleRegisterValidator(w http.ResponseWriter, req *http.Re
 		}
 
 		// Check for a previous registration timestamp
-		prevTimestamp, err := api.datastore.GetValidatorRegistrationTimestamp(pkHex)
+		prevTimestamp, err := api.redis.GetValidatorRegistrationTimestamp(pkHex)
 		if err != nil {
 			regLog.WithError(err).Error("error getting last registration timestamp")
 		} else if prevTimestamp >= uint64(timestampInt) {
@@ -681,7 +702,7 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	bid, err := api.datastore.GetGetHeaderResponse(slot, parentHashHex, proposerPubkeyHex)
+	bid, err := api.redis.GetBestBid(slot, parentHashHex, proposerPubkeyHex)
 	if err != nil {
 		log.WithError(err).Error("could not get bid")
 		api.RespondError(w, http.StatusBadRequest, err.Error())
@@ -720,7 +741,11 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 
 	payload := new(types.SignedBlindedBeaconBlock)
 	if err := json.NewDecoder(req.Body).Decode(payload); err != nil {
-		log.WithError(err).Warn("getPayload request failed to decode")
+		if strings.Contains(err.Error(), "i/o timeout") {
+			log.WithError(err).Error("getPayload request failed to decode (i/o timeout)")
+		} else {
+			log.WithError(err).Warn("getPayload request failed to decode")
+		}
 		api.RespondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -789,6 +814,11 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 
 	// Save information about delivered payload
 	go func() {
+		err = api.redis.SetStats(datastore.RedisStatsFieldSlotLastPayloadDelivered, slot)
+		if err != nil {
+			log.WithError(err).Error("failed to save delivered payload slot to redis")
+		}
+
 		bidTrace, err := api.redis.GetBidTrace(slot, proposerPubkey.String(), blockHash.String())
 		if err != nil {
 			log.WithError(err).Error("failed to get bidTrace for delivered payload from redis")
@@ -803,9 +833,9 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 		}
 
 		// Increment builder stats
-		err = api.db.IncBlockBuilderStatsAfterGetPayload(slot, blockHash.String())
+		err = api.db.IncBlockBuilderStatsAfterGetPayload(bidTrace.BuilderPubkey.String())
 		if err != nil {
-			log.WithError(err).Error("could not increment builder-stats after getPayload")
+			log.WithError(err).Error("failed to increment builder-stats after getPayload")
 		}
 	}()
 
@@ -824,6 +854,46 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 //  BLOCK BUILDER APIS
 // --------------------
 
+// updatedExpectedRandao updates the prev_randao field we expect from builder block submissions
+func (api *RelayAPI) updatedExpectedRandao(slot uint64) {
+	api.log.Infof("updating randao for %d ...", slot)
+	api.expectedPrevRandaoLock.Lock()
+	latestKnownSlot := api.expectedPrevRandao.slot
+	if slot < latestKnownSlot || slot <= api.expectedPrevRandaoUpdating { // do nothing slot is already known or currently being updated
+		api.log.Debugf("- abort updating randao - slot %d, latest: %d, updating: %d", slot, latestKnownSlot, api.expectedPrevRandaoUpdating)
+		api.expectedPrevRandaoLock.Unlock()
+		return
+	}
+	api.expectedPrevRandaoUpdating = slot
+	api.expectedPrevRandaoLock.Unlock()
+
+	// get randao from BN
+	api.log.Debugf("- querying BN for randao for slot %d", slot)
+	randao, err := api.beaconClient.GetRandao(slot)
+	if err != nil {
+		api.log.WithField("slot", slot).WithError(err).Warn("failed to get randao from beacon node")
+		api.expectedPrevRandaoLock.Lock()
+		api.expectedPrevRandaoUpdating = 0
+		api.expectedPrevRandaoLock.Unlock()
+		return
+	}
+
+	// after request, check if still the latest, then update
+	api.expectedPrevRandaoLock.Lock()
+	defer api.expectedPrevRandaoLock.Unlock()
+	targetSlot := slot + 1
+	api.log.Debugf("- after BN randao: slot %d, targetSlot: %d latest: %d", slot, targetSlot, api.expectedPrevRandao.slot)
+
+	// update if still the latest
+	if targetSlot >= api.expectedPrevRandao.slot {
+		api.expectedPrevRandao = randaoHelper{
+			slot:       targetSlot, // the retrieved prev_randao is for the next slot
+			prevRandao: randao.Data.Randao,
+		}
+		api.log.WithField("slot", slot).Infof("updated expected prev_randao to %s for slot %d", randao.Data.Randao, targetSlot)
+	}
+}
+
 func (api *RelayAPI) handleBuilderGetValidators(w http.ResponseWriter, req *http.Request) {
 	api.proposerDutiesLock.RLock()
 	defer api.proposerDutiesLock.RUnlock()
@@ -831,13 +901,26 @@ func (api *RelayAPI) handleBuilderGetValidators(w http.ResponseWriter, req *http
 }
 
 func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Request) {
+	receivedAt := time.Now().UTC()
 	log := api.log.WithFields(logrus.Fields{
 		"method":        "submitNewBlock",
 		"contentLength": req.ContentLength,
 	})
 
+	var err error
+	var r io.Reader = req.Body
+	if req.Header.Get("Content-Encoding") == "gzip" {
+		r, err = gzip.NewReader(req.Body)
+		if err != nil {
+			log.WithError(err).Warn("could not create gzip reader")
+			api.RespondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		log = log.WithField("gzip-req", true)
+	}
+
 	payload := new(types.BuilderSubmitBlockRequest)
-	if err := json.NewDecoder(req.Body).Decode(payload); err != nil {
+	if err := json.NewDecoder(r).Decode(payload); err != nil {
 		log.WithError(err).Warn("could not decode payload")
 		api.RespondError(w, http.StatusBadRequest, err.Error())
 		return
@@ -851,12 +934,49 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 	log = log.WithFields(logrus.Fields{
 		"slot":          payload.Message.Slot,
 		"builderPubkey": payload.Message.BuilderPubkey.String(),
+		"blockHash":     payload.Message.BlockHash.String(),
 	})
 
+	// Reject new submissions once the payload for this slot was delivered
+	slotStr, err := api.redis.GetStats(datastore.RedisStatsFieldSlotLastPayloadDelivered)
+	if err != nil && !errors.Is(err, redis.Nil) {
+		log.WithError(err).Error("failed to get delivered payload slot from redis")
+	} else {
+		slotLastPayloadDelivered, err := strconv.ParseUint(slotStr, 10, 64)
+		if err != nil {
+			log.WithError(err).Errorf("failed to parse delivered payload slot from redis: %s", slotStr)
+		} else if payload.Message.Slot <= slotLastPayloadDelivered {
+			log.Info("rejecting submission because payload for this slot was already delivered")
+			api.RespondError(w, http.StatusBadRequest, "payload for this slot was already delivered")
+			return
+		}
+	}
+
 	builderIsHighPrio, builderIsBlacklisted, err := api.redis.GetBlockBuilderStatus(payload.Message.BuilderPubkey.String())
+	log = log.WithFields(logrus.Fields{
+		"builderIsHighPrio":    builderIsHighPrio,
+		"builderIsBlacklisted": builderIsBlacklisted,
+	})
 	if err != nil {
 		log.WithError(err).Error("could not get block builder status")
 	}
+
+	// Timestamp check
+	expectedTimestamp := api.genesisInfo.Data.GenesisTime + (payload.Message.Slot * 12)
+	if payload.ExecutionPayload.Timestamp != expectedTimestamp {
+		log.Warnf("incorrect timestamp. got %d, expected %d", payload.ExecutionPayload.Timestamp, expectedTimestamp)
+		api.RespondError(w, http.StatusBadRequest, fmt.Sprintf("incorrect timestamp. got %d, expected %d", payload.ExecutionPayload.Timestamp, expectedTimestamp))
+		return
+	}
+
+	// randao check 1:
+	// - querying the randao from the BN if payload has a newer slot (might be faster than headSlot event)
+	// - check for validity happens later, again after validation (to use some time for BN request to finish...)
+	api.expectedPrevRandaoLock.RLock()
+	if payload.Message.Slot > api.expectedPrevRandao.slot {
+		go api.updatedExpectedRandao(payload.Message.Slot - 1)
+	}
+	api.expectedPrevRandaoLock.RUnlock()
 
 	// ensure correct feeRecipient is used
 	api.proposerDutiesLock.RLock()
@@ -867,7 +987,7 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 		api.RespondError(w, http.StatusBadRequest, "could not find slot duty")
 		return
 	} else if slotDuty.FeeRecipient != payload.Message.ProposerFeeRecipient {
-		log.Warn("fee recipient does not match")
+		log.Info("fee recipient does not match")
 		api.RespondError(w, http.StatusBadRequest, "fee recipient does not match")
 		return
 	}
@@ -890,7 +1010,6 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 	log = log.WithFields(logrus.Fields{
 		"builderHighPrio": builderIsHighPrio,
 		"proposerPubkey":  payload.Message.ProposerPubkey.String(),
-		"blockHash":       payload.Message.BlockHash.String(),
 		"parentHash":      payload.Message.ParentHash.String(),
 		"value":           payload.Message.Value.String(),
 		"tx":              len(payload.ExecutionPayload.Transactions),
@@ -910,10 +1029,25 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 	}
 
 	// Sanity check the submission
-	err = VerifyBuilderBlockSubmission(payload)
+	err = SanityCheckBuilderBlockSubmission(payload)
 	if err != nil {
-		log.WithError(err).Warn("block submission sanity checks failed")
+		log.WithError(err).Info("block submission sanity checks failed")
 		api.RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// get the latest randao and check again, it might have updated in the meantime)
+	api.expectedPrevRandaoLock.RLock()
+	expectedRandao := api.expectedPrevRandao
+	api.expectedPrevRandaoLock.RUnlock()
+	if expectedRandao.slot != payload.Message.Slot { // we still don't have the prevrandao yet
+		log.Warn("prev_randao is not known yet")
+		api.RespondError(w, http.StatusInternalServerError, "prev_randao is not known yet")
+		return
+	} else if expectedRandao.prevRandao != payload.ExecutionPayload.Random.String() {
+		msg := fmt.Sprintf("incorrect prev_randao - got: %s, expected: %s", payload.ExecutionPayload.Random.String(), expectedRandao.prevRandao)
+		log.Info(msg)
+		api.RespondError(w, http.StatusBadRequest, msg)
 		return
 	}
 
@@ -933,17 +1067,16 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 	}
 
 	var simErr error
-	isMostProfitableBlock := false
 
 	// At end of this function, save builder submission to database (in the background)
 	defer func() {
-		submissionEntry, err := api.db.SaveBuilderBlockSubmission(payload, simErr, isMostProfitableBlock)
+		submissionEntry, err := api.db.SaveBuilderBlockSubmission(payload, simErr, receivedAt)
 		if err != nil {
 			log.WithError(err).WithField("payload", payload).Error("saving builder block submission to database failed")
 			return
 		}
 
-		err = api.db.UpsertBlockBuilderEntryAfterSubmission(submissionEntry, simErr != nil, isMostProfitableBlock)
+		err = api.db.UpsertBlockBuilderEntryAfterSubmission(submissionEntry, simErr != nil)
 		if err != nil {
 			log.WithError(err).Error("failed to upsert block-builder-entry")
 		}
@@ -951,7 +1084,11 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 
 	// Simulate the block submission and save to db
 	t := time.Now()
-	simErr = api.blockSimRateLimiter.send(req.Context(), payload, builderIsHighPrio)
+	validationRequestPayload := &BuilderBlockValidationRequest{
+		BuilderSubmitBlockRequest: *payload,
+		RegisteredGasLimit:        slotDuty.GasLimit,
+	}
+	simErr = api.blockSimRateLimiter.send(req.Context(), validationRequestPayload, builderIsHighPrio)
 
 	if simErr != nil {
 		log = log.WithField("simErr", simErr.Error())
@@ -968,19 +1105,13 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 		}).Info("block validation successful")
 	}
 
-	// Check if there's already a bid
-	prevBid, err := api.datastore.GetGetHeaderResponse(payload.Message.Slot, payload.Message.ParentHash.String(), payload.Message.ProposerPubkey.String())
+	// Ensure this request is still the latest one
+	latestPayloadReceivedAt, err := api.redis.GetBuilderLatestPayloadReceivedAt(payload.Message.Slot, payload.Message.BuilderPubkey.String(), payload.Message.ParentHash.String(), payload.Message.ProposerPubkey.String())
 	if err != nil {
-		log.WithError(err).Error("error getting previous bid")
-		api.RespondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Only proceed if this bid is higher than previous one
-	isMostProfitableBlock = prevBid == nil || payload.Message.Value.Cmp(&prevBid.Data.Message.Value) == 1
-	if !isMostProfitableBlock {
-		log.Debug("block submission with same or lower value")
-		w.WriteHeader(http.StatusOK)
+		log.WithError(err).Error("failed getting latest payload receivedAt from redis")
+	} else if receivedAt.UnixMilli() < latestPayloadReceivedAt {
+		log.Infof("already have a newer payload: now=%d / prev=%d", receivedAt.UnixMilli(), latestPayloadReceivedAt)
+		api.RespondError(w, http.StatusBadRequest, "already using a newer payload")
 		return
 	}
 
@@ -1007,18 +1138,49 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 		BlockNumber: payload.ExecutionPayload.BlockNumber,
 		NumTx:       uint64(len(payload.ExecutionPayload.Transactions)),
 	}
-	err = api.datastore.SaveBid(&bidTrace, &getHeaderResponse, &getPayloadResponse)
+
+	//
+	// Save to Redis
+	//
+	// first the trace
+	err = api.redis.SaveBidTrace(&bidTrace)
 	if err != nil {
-		log.WithError(err).Error("could not save bid and block")
-		api.RespondError(w, http.StatusBadRequest, err.Error())
+		log.WithError(err).Error("failed saving bidTrace in redis")
+		api.RespondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
+	// save execution payload (getPayload response)
+	err = api.redis.SaveExecutionPayload(payload.Message.Slot, payload.Message.ProposerPubkey.String(), payload.Message.BlockHash.String(), &getPayloadResponse)
+	if err != nil {
+		log.WithError(err).Error("failed saving execution payload in redis")
+		api.RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// save this builder's latest bid
+	err = api.redis.SaveLatestBuilderBid(payload.Message.Slot, payload.Message.BuilderPubkey.String(), payload.Message.ParentHash.String(), payload.Message.ProposerPubkey.String(), receivedAt, &getHeaderResponse)
+	if err != nil {
+		log.WithError(err).Error("could not save latest builder bid")
+		api.RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// recalculate top bid
+	err = api.redis.UpdateTopBid(payload.Message.Slot, payload.Message.ParentHash.String(), payload.Message.ProposerPubkey.String())
+	if err != nil {
+		log.WithError(err).Error("could not compute top bid")
+		api.RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	//
+	// all done
+	//
 	log.WithFields(logrus.Fields{
-		"proposerPubkey":   payload.Message.ProposerPubkey.String(),
-		"value":            payload.Message.Value.String(),
-		"tx":               len(payload.ExecutionPayload.Transactions),
-		"isMostProfitable": isMostProfitableBlock,
+		"proposerPubkey": payload.Message.ProposerPubkey.String(),
+		"value":          payload.Message.Value.String(),
+		"tx":             len(payload.ExecutionPayload.Transactions),
 	}).Info("received block from builder")
 
 	// Respond with OK (TODO: proper response response data type https://flashbots.notion.site/Relay-API-Spec-5fb0819366954962bc02e81cb33840f5#fa719683d4ae4a57bc3bf60e138b0dc6)
@@ -1175,7 +1337,7 @@ func (api *RelayAPI) handleDataBuilderBidsReceived(w http.ResponseWriter, req *h
 	args := req.URL.Query()
 
 	filters := database.GetBuilderSubmissionsFilters{
-		Limit:         200,
+		Limit:         500,
 		Slot:          0,
 		BlockHash:     "",
 		BlockNumber:   0,
@@ -1183,14 +1345,11 @@ func (api *RelayAPI) handleDataBuilderBidsReceived(w http.ResponseWriter, req *h
 	}
 
 	if args.Get("cursor") != "" {
-		api.RespondError(w, http.StatusBadRequest, "cursor argument not supported on this API")
+		api.RespondError(w, http.StatusBadRequest, "cursor argument not supported")
 		return
 	}
 
-	if args.Get("slot") != "" && args.Get("cursor") != "" {
-		api.RespondError(w, http.StatusBadRequest, "cannot specify both slot and cursor")
-		return
-	} else if args.Get("slot") != "" {
+	if args.Get("slot") != "" {
 		filters.Slot, err = strconv.ParseUint(args.Get("slot"), 10, 64)
 		if err != nil {
 			api.RespondError(w, http.StatusBadRequest, "invalid slot argument")
@@ -1222,6 +1381,12 @@ func (api *RelayAPI) handleDataBuilderBidsReceived(w http.ResponseWriter, req *h
 			return
 		}
 		filters.BuilderPubkey = args.Get("builder_pubkey")
+	}
+
+	// at least one query arguments is required
+	if filters.Slot == 0 && filters.BlockHash == "" && filters.BlockNumber == 0 && filters.BuilderPubkey == "" {
+		api.RespondError(w, http.StatusBadRequest, "need to query for specific slot or block_hash or block_number or builder_pubkey")
+		return
 	}
 
 	if args.Get("limit") != "" {

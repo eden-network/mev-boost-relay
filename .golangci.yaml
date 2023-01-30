@@ -62,7 +62,13 @@ linters-settings:
       - G108
 
   gocognit:
-    min-complexity: 34 # default: 30
+    min-complexity: 85 # default: 30
+
+  gocyclo:
+    min-complexity: 65 # default: 30
+
+  maintidx:
+    under: 5
 
   tagliatelle:
     case:
@@ -98,3 +104,9 @@ linters-settings:
       - 'MockBeaconClient'
       - 'RelayAPI'
       - 'Webserver'
+
+issues:
+  exclude-rules:
+    - path: (.+)_test.go
+      linters:
+        - exhaustruct
