@@ -66,6 +66,11 @@ var (
 	numActiveValidatorProcessors = cli.GetEnvInt("NUM_ACTIVE_VALIDATOR_PROCESSORS", 10)
 	numValidatorRegProcessors    = cli.GetEnvInt("NUM_VALIDATOR_REG_PROCESSORS", 10)
 	timeoutGetPayloadRetryMs     = cli.GetEnvInt("GETPAYLOAD_RETRY_TIMEOUT_MS", 100)
+
+	apiReadTimeoutMs       = cli.GetEnvInt("API_TIMEOUT_READ_MS", 1500)
+	apiReadHeaderTimeoutMs = cli.GetEnvInt("API_TIMEOUT_READHEADER_MS", 600)
+	apiWriteTimeoutMs      = cli.GetEnvInt("API_TIMEOUT_WRITE_MS", 10000)
+	apiIdleTimeoutMs       = cli.GetEnvInt("API_TIMEOUT_IDLE_MS", 3000)
 )
 
 // RelayAPIOpts contains the options for a relay
@@ -330,10 +335,10 @@ func (api *RelayAPI) StartServer() (err error) {
 		Addr:    api.opts.ListenAddr,
 		Handler: api.getRouter(),
 
-		ReadTimeout:       1500 * time.Millisecond,
-		ReadHeaderTimeout: 600 * time.Millisecond,
-		WriteTimeout:      3 * time.Second,
-		IdleTimeout:       3 * time.Second,
+		ReadTimeout:       time.Duration(apiReadTimeoutMs) * time.Millisecond,
+		ReadHeaderTimeout: time.Duration(apiReadHeaderTimeoutMs) * time.Millisecond,
+		WriteTimeout:      time.Duration(apiWriteTimeoutMs) * time.Millisecond,
+		IdleTimeout:       time.Duration(apiIdleTimeoutMs) * time.Millisecond,
 	}
 
 	err = api.srv.ListenAndServe()
@@ -1096,6 +1101,12 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 			"duration":   time.Since(t).Seconds(),
 			"numWaiting": api.blockSimRateLimiter.currentCounter(),
 		}).Warn("block validation failed")
+
+		if os.IsTimeout(simErr) {
+			api.RespondError(w, http.StatusGatewayTimeout, "validation request timeout")
+			return
+		}
+
 		api.RespondError(w, http.StatusBadRequest, simErr.Error())
 		return
 	} else {
