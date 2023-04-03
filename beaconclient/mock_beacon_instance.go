@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/flashbots/go-boost-utils/types"
+	"github.com/flashbots/mev-boost-relay/common"
 )
 
 type MockBeaconInstance struct {
@@ -83,6 +84,8 @@ func (c *MockBeaconInstance) CurrentSlot() (uint64, error) {
 
 func (c *MockBeaconInstance) SubscribeToHeadEvents(slotC chan HeadEventData) {}
 
+func (c *MockBeaconInstance) SubscribeToPayloadAttributesEvents(slotC chan PayloadAttributesEvent) {}
+
 func (c *MockBeaconInstance) GetProposerDuties(epoch uint64) (*ProposerDutiesResponse, error) {
 	c.addDelay()
 	return c.MockProposerDuties, c.MockProposerDutiesErr
@@ -98,7 +101,7 @@ func (c *MockBeaconInstance) addDelay() {
 	}
 }
 
-func (c *MockBeaconInstance) PublishBlock(block *types.SignedBeaconBlock) (code int, err error) {
+func (c *MockBeaconInstance) PublishBlock(block *common.SignedBeaconBlock) (code int, err error) {
 	return 0, nil
 }
 
@@ -114,6 +117,14 @@ func (c *MockBeaconInstance) GetSpec() (spec *GetSpecResponse, err error) {
 	return nil, nil
 }
 
+func (c *MockBeaconInstance) GetForkSchedule() (spec *GetForkScheduleResponse, err error) {
+	return nil, nil
+}
+
 func (c *MockBeaconInstance) GetRandao(slot uint64) (spec *GetRandaoResponse, err error) {
+	return nil, nil
+}
+
+func (c *MockBeaconInstance) GetWithdrawals(slot uint64) (spec *GetWithdrawalsResponse, err error) {
 	return nil, nil
 }

@@ -39,7 +39,7 @@ func newTestBackend(t require.TestingT, numBeaconNodes int) *testBackend {
 
 	db := database.MockDB{}
 
-	ds, err := datastore.NewDatastore(common.TestLog, redisCache, db)
+	ds, err := datastore.NewDatastore(common.TestLog, redisCache, nil, db)
 	require.NoError(t, err)
 
 	sk, _, err := bls.GenerateNewKeypair()
@@ -53,12 +53,13 @@ func newTestBackend(t require.TestingT, numBeaconNodes int) *testBackend {
 		Redis:        redisCache,
 		DB:           db,
 		EthNetDetails: common.EthNetworkDetails{
-			Name:                     "test",
-			GenesisForkVersionHex:    genesisForkVersionHex,
-			GenesisValidatorsRootHex: "",
-			BellatrixForkVersionHex:  "0x00000000",
-			DomainBuilder:            builderSigningDomain,
-			DomainBeaconProposer:     types.Domain{},
+			Name:                          "test",
+			GenesisForkVersionHex:         genesisForkVersionHex,
+			GenesisValidatorsRootHex:      "",
+			BellatrixForkVersionHex:       "0x00000000",
+			DomainBuilder:                 builderSigningDomain,
+			DomainBeaconProposerBellatrix: types.Domain{},
+			DomainBeaconProposerCapella:   types.Domain{},
 		},
 		SecretKey:       sk,
 		ProposerAPI:     true,
@@ -105,10 +106,10 @@ func generateSignedValidatorRegistration(sk *bls.SecretKey, feeRecipient types.A
 		}
 	}
 
-	blsPubKey := bls.PublicKeyFromSecretKey(sk)
+	blsPubKey, _ := bls.PublicKeyFromSecretKey(sk)
 
 	var pubKey types.PublicKey
-	err = pubKey.FromSlice(blsPubKey.Compress())
+	err = pubKey.FromSlice(bls.PublicKeyToBytes(blsPubKey))
 	if err != nil {
 		return nil, err
 	}

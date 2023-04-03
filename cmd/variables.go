@@ -13,6 +13,7 @@ var (
 	defaultPriorityBuilders = common.GetSliceEnv("PRIORITY_BUILDERS", []string{""})
 	defaultRedisURI         = common.GetEnv("REDIS_URI", "localhost:6379")
 	defaultPostgresDSN      = common.GetEnv("POSTGRES_DSN", "")
+	defaultMemcachedURIs    = common.GetSliceEnv("MEMCACHED_URIS", nil)
 	defaultLogJSON          = os.Getenv("LOG_JSON") != ""
 	defaultLogLevel         = common.GetEnv("LOG_LEVEL", "info")
 
@@ -22,6 +23,7 @@ var (
 	postgresDSN               string
 
 	priorityBuilders []string
+	memcachedURIs    []string
 
 	logJSON  bool
 	logLevel string

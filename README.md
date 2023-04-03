@@ -15,19 +15,27 @@ The relay consists of several components that are designed to run and scale inde
 1. [Website](https://github.com/eden-network/mev-boost-relay/tree/main/services/website): handles the root website requests (information is pulled from Redis and database).
 1. [Housekeeper](https://github.com/eden-network/mev-boost-relay/tree/main/services/housekeeper): update known validators, proposer duties.
 
-Dependencies:
-
-1. Redis
-1. PostgreSQL
-1. one or more beacon nodes
-1. block submission validation nodes
-
-**See also:**
+#### See also
 
 * [Docker images](https://hub.docker.com/r/edennetwork/builder-relay)
 * [mev-boost](https://github.com/flashbots/mev-boost)
 * [Relay API specs](https://flashbots.github.io/relay-specs)
-* [Guide for running mev-boost-relay at scale](https://flashbots.notion.site/Running-mev-boost-relay-at-scale-draft-4040ccd5186c425d9a860cbb29bbfe09)
+* [Guider for running mev-boost-relay at scale](https://flashbots.notion.site/Running-mev-boost-relay-at-scale-draft-4040ccd5186c425d9a860cbb29bbfe09)
+
+
+#### Dependencies
+
+1. Redis
+1. PostgreSQL
+1. one or more [beacon nodes](#running-beacon-node--s-) (note: run multiple beacon nodes!)
+1. block submission validation nodes
+1. [optional] Memcached
+
+#### About beacon nodes:
+
+* Relays are strongly advised to run multiple beacon nodes localy!
+* The reason being that on getPayload, the block has to be accepted by a local beacon node before it is returned to the proposer.
+* If the local beacon nodes don't accept it, the block won't be returned to the proposer, which leads to the proposer missing the slot.
 
 ---
 
@@ -57,25 +65,28 @@ Read more in [Why run mev-boost?](https://writings.flashbots.net/writings/why-ru
 
 # Usage
 
+## Running Beacon Node(s)
+
+- The services need access to a beacon node for event subscriptions. You can specify multiple beacon nodes by providing a comma separated list of beacon node URIs.
+  - The default beacon API is `localhost:3500` (Prysm default beacon-API port)
+- The beacon node needs to support the `payload_attributes` SSE event [[1]](https://github.com/ethereum/beacon-APIs/pull/305). As of now, this is either:
+  - Prysm v4.0.0+
+  - Lighthouse v4.0.1+ (with `--always-prepare-payload` and `--prepare-payload-lookahead 12000` flags, and some junk feeRecipeint)
+
+## Running Postgres, Redis and Memcached
 ```bash
 # Start PostgreSQL & Redis individually:
 docker run -d -p 5432:5432 -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres postgres
 docker run -d -p 6379:6379 redis
+
+# [optional] Start Memcached
+docker run -d -p 11211:11211 memcached
 
 # Or with docker-compose:
 docker-compose up
 ```
 
 Note: docker-compose also runs an Adminer (a web frontend for Postgres) on http://localhost:8093/?username=postgres (db: `postgres`, username: `postgres`, password: `postgres`)
-
-The services need access to a beacon node for event subscriptions. You can also specify multiple beacon nodes by providing a comma separated list of beacon node URIs.
-The beacon API by default is using `localhost:3500` (the Prysm default beacon-API port).
-
-You can proxy the beacon-API port (eg. 3500 for Prysm) from a server like this:
-
-```bash
-ssh -L 3500:localhost:3500 your_server
-```
 
 Now start the services:
 
@@ -102,22 +113,34 @@ redis-cli DEL boost-relay/sepolia:validators-registration boost-relay/sepolia:va
 
 ### Environment variables
 
-* `DB_TABLE_PREFIX` - prefix to use for db tables (default uses `dev`)
-* `DB_DONT_APPLY_SCHEMA` - disable applying DB schema on startup (useful for connecting data API to read-only replica)
-* `BLOCKSIM_MAX_CONCURRENT` - maximum number of concurrent block-sim requests (0 for no maximum)
-* `FORCE_GET_HEADER_204` - force 204 as getHeader response
-* `DISABLE_BLOCK_PUBLISHING` - disable publishing blocks to the beacon node at the end of getPayload
-* `DISABLE_LOWPRIO_BUILDERS` - reject block submissions by low-prio builders
-* `DISABLE_BID_MEMORY_CACHE` - disable bids to go through in-memory cache. forces to go through redis/db
-* `NUM_ACTIVE_VALIDATOR_PROCESSORS` - proposer API - number of goroutines to listen to the active validators channel
-* `NUM_VALIDATOR_REG_PROCESSORS` - proposer API - number of goroutines to listen to the validator registration channel
 * `ACTIVE_VALIDATOR_HOURS` - number of hours to track active proposers in redis (default: 3)
-* `GETPAYLOAD_RETRY_TIMEOUT_MS` - getPayload retry getting a payload if first try failed (default: 100)
 * `API_TIMEOUT_READ_MS` - http read timeout in milliseconds (default: 1500)
 * `API_TIMEOUT_READHEADER_MS` - http read header timeout in milliseconds (default: 600)
 * `API_TIMEOUT_WRITE_MS` - http write timeout in milliseconds (default: 10000)
 * `API_TIMEOUT_IDLE_MS` - http idle timeout in milliseconds (default: 3000)
+* `API_MAX_HEADER_BYTES` - http maximum header byted (default: 60kb)
+* `BLOCKSIM_MAX_CONCURRENT` - maximum number of concurrent block-sim requests (0 for no maximum)
 * `BLOCKSIM_TIMEOUT_MS` - builder block submission validation request timeout (default: 3000)
+* `DB_DONT_APPLY_SCHEMA` - disable applying DB schema on startup (useful for connecting data API to read-only replica)
+* `DB_TABLE_PREFIX` - prefix to use for db tables (default uses `dev`)
+* `GETPAYLOAD_RETRY_TIMEOUT_MS` - getPayload retry getting a payload if first try failed (default: 100)
+* `MEMCACHED_URIS` - optional comma separated list of memcached endpoints, typically used as secondary storage alongside Redis
+* `MEMCACHED_EXPIRY_SECONDS` - item expiry timeout when using memcache (default: 45)
+* `NUM_ACTIVE_VALIDATOR_PROCESSORS` - proposer API - number of goroutines to listen to the active validators channel
+* `NUM_VALIDATOR_REG_PROCESSORS` - proposer API - number of goroutines to listen to the validator registration channel
+
+#### Feature Flags
+
+* `DISABLE_PAYLOAD_DATABASE_STORAGE` - builder API - disable storing execution payloads in the database (i.e. when using memcached as data availability redundancy)
+* `DISABLE_LOWPRIO_BUILDERS` - reject block submissions by low-prio builders
+* `FORCE_GET_HEADER_204` - force 204 as getHeader response
+* `DISABLE_SSE_PAYLOAD_ATTRIBUTES` - instead of using SSE events, poll withdrawals and randao (requires custom Prysm fork)
+
+#### Development Environment Variables
+
+* `RUN_DB_TESTS` - when set to "1" enables integration tests with Postgres using endpoint specified by environment variable `TEST_DB_DSN`
+* `RUN_INTEGRATION_TESTS` - when set to "1" enables integration tests, currently used for testing Memcached using comma separated list of endpoints specified by `MEMCACHED_URIS`
+* `TEST_DB_DSN` - specifies connection string using Data Source Name (DSN) for Postgres (default: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable)
 
 ### Updating the website
 
@@ -137,6 +160,21 @@ The website is using:
 # Technical Notes
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for more technical details!
+
+### Storing execution payloads and redundant data availability
+
+By default, the execution payloads for all block submission are stored in Redis and also in the Postgres database,
+to provide redundant data availability for getPayload responses. But the database table is not pruned automatically,
+because it takes a lot of resources to rebuild the indexes (and a better option is using `TRUNCATE`).
+
+Storing all the payloads in the database can lead to terrabytes of data in this particular table. Now it's also possible
+to use memcached as a second data availability layer. Using memcached is optional and disabled by default.
+
+To enable memcached, you just need to supply the memcached URIs either via environment variable (i.e.
+`MEMCACHED_URIS=localhost:11211`) or through command line flag (`--memcached-uris`).
+
+You can disable storing the execution payloads in the database with this environment variable:
+`DISABLE_PAYLOAD_DATABASE_STORAGE=1`.
 
 ---
 
