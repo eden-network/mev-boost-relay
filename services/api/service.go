@@ -1329,8 +1329,8 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 		return
 	}
 
-	if !api.builderWhitelist[payload.Message.BuilderPubkey.String()] {
-		log.Info("builder is not on whitelist: ", payload.Message.BuilderPubkey.String())
+	if !api.builderWhitelist[builderPubkey.String()] {
+		log.Info("builder is not on whitelist: ", builderPubkey.String())
 		time.Sleep(200 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
 		return
