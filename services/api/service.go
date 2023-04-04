@@ -107,6 +107,8 @@ type RelayAPIOpts struct {
 	DataAPI         bool
 	PprofAPI        bool
 	InternalAPI     bool
+
+	BuilderWhitelist map[string]bool
 }
 
 type randaoHelper struct {
