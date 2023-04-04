@@ -3,7 +3,9 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -43,6 +45,9 @@ type IDatabaseService interface {
 	SetBlockBuilderStatus(pubkey string, isHighPrio, isBlacklisted bool) error
 	UpsertBlockBuilderEntryAfterSubmission(lastSubmission *BuilderBlockSubmissionEntry, isError bool) error
 	IncBlockBuilderStatsAfterGetPayload(builderPubkey string) error
+	InsertBlockedValidator(entry BlockedValidatorEntry) error
+	GetBlockedValidator(pubkey string) (*BlockedValidatorEntry, error)
+	IsValidatorBlocked(pubkey string) (bool, error)
 }
 
 type DatabaseService struct {
@@ -50,6 +55,31 @@ type DatabaseService struct {
 
 	nstmtInsertExecutionPayload       *sqlx.NamedStmt
 	nstmtInsertBlockBuilderSubmission *sqlx.NamedStmt
+}
+
+func (s *DatabaseService) InsertBlockedValidator(entry BlockedValidatorEntry) error {
+	query := `INSERT INTO ` + vars.TableBlockedValidator + `
+		(pubkey, is_blocked, notes) VALUES (:pubkey, :is_blocked, :notes)`
+	_, err := s.DB.NamedExec(query, entry)
+	return err
+}
+
+func (s *DatabaseService) GetBlockedValidator(pubkey string) (*BlockedValidatorEntry, error) {
+	query := `SELECT id, inserted_at, pubkey, is_blocked, notes FROM ` + vars.TableBlockedValidator + ` WHERE pubkey=$1;`
+	entry := &BlockedValidatorEntry{}
+	err := s.DB.Get(entry, query, pubkey)
+	return entry, err
+}
+
+func (s *DatabaseService) IsValidatorBlocked(pubkey string) (bool, error) {
+	entry, err := s.GetBlockedValidator(pubkey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return entry.Blocked, nil
 }
 
 func NewDatabaseService(dsn string) (*DatabaseService, error) {

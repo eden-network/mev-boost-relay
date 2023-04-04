@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"math/rand"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -106,8 +107,6 @@ type RelayAPIOpts struct {
 	DataAPI         bool
 	PprofAPI        bool
 	InternalAPI     bool
-
-	BuilderWhitelist map[string]bool
 }
 
 type randaoHelper struct {
@@ -164,9 +163,6 @@ type RelayAPI struct {
 	ffAllowMemcacheSavingFail     bool // don't fail when saving payloads to memcache doesn't succeed
 
 	latestParentBlockHash uberatomic.String // used to cache the latest parent block hash, to avoid repetitive similar SSE events
-
-	// Whitelisted builders
-	builderWhitelist map[string]bool
 
 	expectedPrevRandao         randaoHelper
 	expectedPrevRandaoLock     sync.RWMutex
@@ -238,8 +234,6 @@ func NewRelayAPI(opts RelayAPIOpts) (api *RelayAPI, err error) {
 
 		activeValidatorC: make(chan boostTypes.PubkeyHex, 450_000),
 		validatorRegC:    make(chan boostTypes.SignedValidatorRegistration, 450_000),
-
-		builderWhitelist: opts.BuilderWhitelist,
 	}
 
 	if os.Getenv("FORCE_GET_HEADER_204") == "1" {
@@ -929,14 +923,20 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 		payload.Capella = capellaPayload
 	}
 
-	log = log.WithFields(logrus.Fields{
-		"slot":      payload.Slot(),
-		"blockHash": payload.BlockHash(),
-		"idArg":     req.URL.Query().Get("id"),
-	})
-
 	// Snapshot current time
 	requestTime := time.Now().UTC()
+	slotStartTimestamp := api.genesisInfo.Data.GenesisTime + (payload.Slot() * 12)
+	msIntoSlot := uint64(requestTime.UnixMilli()) - (slotStartTimestamp * 1000)
+
+	log = log.WithFields(logrus.Fields{
+		"slot":             payload.Slot(),
+		"blockHash":        payload.BlockHash(),
+		"idArg":            req.URL.Query().Get("id"),
+		"requestTimestamp": requestTime.Unix(),
+		"slotStartSec":     slotStartTimestamp,
+		"msIntoSlot":       msIntoSlot,
+	})
+	log.Info("getPayload request received")
 
 	// Start with signature validation
 	proposerPubkey, found := api.datastore.GetKnownValidatorPubkeyByIndex(payload.ProposerIndex())
@@ -970,13 +970,35 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 	}
 
 	// Only allow getPayload requests for the current slot until a certain cutoff time (2 sec into the slot)
-	slotStartMs := (api.genesisInfo.Data.GenesisTime + (payload.Slot() * 12)) * 1000
-	msIntoSlot := uint64(requestTime.UnixMilli()) - slotStartMs
-	log.WithField("msIntoSlot", msIntoSlot).Info("getPayload request received")
 	if msIntoSlot > uint64(getPayloadRequestCutoffMs) {
-		log.WithField("msIntoSlot", msIntoSlot).Error("getPayload sent too late")
+		log.Error("getPayload sent too late")
 		api.RespondError(w, http.StatusBadRequest, "sent too late")
 		return
+	}
+
+	// Check if validator is blocked.
+	blocked, err := api.db.IsValidatorBlocked(pk.String())
+	if err != nil {
+		log.WithError(err).Error("unable to get validator blocked status")
+	} else if blocked {
+		log.Error("validator is blocked")
+		api.RespondError(w, http.StatusBadRequest, "validator is blocked")
+		return
+	}
+
+	// Check whether getPayload has already been called
+	lastSlotDeliveredStr, err := api.redis.GetStats(datastore.RedisStatsFieldSlotLastPayloadDelivered)
+	if err != nil && !errors.Is(err, redis.Nil) {
+		log.WithError(err).Error("failed to get delivered payload slot from redis")
+	} else {
+		slotLastPayloadDelivered, err := strconv.ParseUint(lastSlotDeliveredStr, 10, 64)
+		if err != nil {
+			log.WithError(err).Errorf("failed to parse delivered payload slot from redis: %s", lastSlotDeliveredStr)
+		} else if payload.Slot() <= slotLastPayloadDelivered {
+			log.Error("getPayload was already called for this slot")
+			api.RespondError(w, http.StatusBadRequest, "payload for this slot was already delivered")
+			return
+		}
 	}
 
 	// Get the response - from memory, Redis or DB
@@ -999,6 +1021,10 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 		}
 	}
 
+	// Random delay before publishing (0-500ms)
+	delayMillis := rand.Intn(500) //nolint:gosec
+	time.Sleep(time.Duration(delayMillis) * time.Millisecond)
+
 	// Publish the signed beacon block via beacon-node
 	signedBeaconBlock := SignedBlindedBeaconBlockToBeaconBlock(payload, getPayloadResp)
 	code, err := api.beaconClient.PublishBlock(signedBeaconBlock) // errors are logged inside
@@ -1007,10 +1033,20 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 		api.RespondError(w, http.StatusBadRequest, "failed to publish block")
 		return
 	}
+	log.Info("block published through beacon node")
+
+	// Remember that getPayload has already been called
+	go func() {
+		err := api.redis.SetStats(datastore.RedisStatsFieldSlotLastPayloadDelivered, payload.Slot())
+		if err != nil {
+			log.WithError(err).Error("failed to save delivered payload slot to redis")
+		}
+	}()
 
 	// give the beacon network some time to propagate the block
 	time.Sleep(time.Duration(getPayloadResponseDelayMs) * time.Millisecond)
 
+	// respond to the HTTP request
 	api.RespondOK(w, getPayloadResp)
 	log = log.WithFields(logrus.Fields{
 		"numTx":       getPayloadResp.NumTx(),
@@ -1020,11 +1056,6 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 
 	// Save information about delivered payload
 	go func() {
-		err = api.redis.SetStats(datastore.RedisStatsFieldSlotLastPayloadDelivered, payload.Slot())
-		if err != nil {
-			log.WithError(err).Error("failed to save delivered payload slot to redis")
-		}
-
 		bidTrace, err := api.redis.GetBidTrace(payload.Slot(), proposerPubkey.String(), payload.BlockHash())
 		if err != nil {
 			log.WithError(err).Error("failed to get bidTrace for delivered payload from redis")
@@ -1340,15 +1371,8 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 	signature := payload.Signature()
 	ok, err := boostTypes.VerifySignature(payload.Message(), api.opts.EthNetDetails.DomainBuilder, builderPubkey[:], signature[:])
 	if !ok || err != nil {
-		log.WithError(err).Warnf("could not verify builder signature")
+		log.WithError(err).Warn("could not verify builder signature")
 		api.RespondError(w, http.StatusBadRequest, "invalid signature")
-		return
-	}
-
-	if !api.builderWhitelist[builderPubkey.String()] {
-		log.Info("builder is not on whitelist: ", builderPubkey.String())
-		time.Sleep(200 * time.Millisecond)
-		w.WriteHeader(http.StatusOK)
 		return
 	}
 
@@ -1383,7 +1407,7 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 		log.WithError(simErr).WithFields(logrus.Fields{
 			"duration":   time.Since(t).Seconds(),
 			"numWaiting": api.blockSimRateLimiter.currentCounter(),
-		}).Warn("block validation failed")
+		}).Info("block validation failed")
 
 		if os.IsTimeout(simErr) {
 			api.RespondError(w, http.StatusGatewayTimeout, "validation request timeout")
