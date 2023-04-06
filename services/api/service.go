@@ -73,8 +73,8 @@ var (
 	numActiveValidatorProcessors = cli.GetEnvInt("NUM_ACTIVE_VALIDATOR_PROCESSORS", 10)
 	numValidatorRegProcessors    = cli.GetEnvInt("NUM_VALIDATOR_REG_PROCESSORS", 10)
 	timeoutGetPayloadRetryMs     = cli.GetEnvInt("GETPAYLOAD_RETRY_TIMEOUT_MS", 100)
-	getPayloadRequestCutoffMs    = cli.GetEnvInt("GETPAYLOAD_REQUEST_CUTOFF_MS", 3000)
-	getPayloadResponseDelayMs    = cli.GetEnvInt("GETPAYLOAD_DELAY_MS", 1000)
+	// getPayloadRequestCutoffMs    = cli.GetEnvInt("GETPAYLOAD_REQUEST_CUTOFF_MS", 3000)
+	getPayloadResponseDelayMs = cli.GetEnvInt("GETPAYLOAD_DELAY_MS", 1000)
 
 	apiReadTimeoutMs       = cli.GetEnvInt("API_TIMEOUT_READ_MS", 1500)
 	apiReadHeaderTimeoutMs = cli.GetEnvInt("API_TIMEOUT_READHEADER_MS", 600)
@@ -972,21 +972,21 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 	}
 
 	// Only allow getPayload requests for the current slot until a certain cutoff time (2 sec into the slot)
-	if msIntoSlot > uint64(getPayloadRequestCutoffMs) {
-		log.Error("getPayload sent too late")
-		api.RespondError(w, http.StatusBadRequest, "sent too late")
-		return
-	}
+	// if msIntoSlot > uint64(getPayloadRequestCutoffMs) {
+	// 	log.Error("getPayload sent too late")
+	// 	api.RespondError(w, http.StatusBadRequest, "sent too late")
+	// 	return
+	// }
 
 	// Check if validator is blocked.
-	blocked, err := api.db.IsValidatorBlocked(pk.String())
-	if err != nil {
-		log.WithError(err).Error("unable to get validator blocked status")
-	} else if blocked {
-		log.Error("validator is blocked")
-		api.RespondError(w, http.StatusBadRequest, "validator is blocked")
-		return
-	}
+	// blocked, err := api.db.IsValidatorBlocked(pk.String())
+	// if err != nil {
+	// 	log.WithError(err).Error("unable to get validator blocked status")
+	// } else if blocked {
+	// 	log.Error("validator is blocked")
+	// 	api.RespondError(w, http.StatusBadRequest, "validator is blocked")
+	// 	return
+	// }
 
 	// Check whether getPayload has already been called
 	lastSlotDeliveredStr, err := api.redis.GetStats(datastore.RedisStatsFieldSlotLastPayloadDelivered)
