@@ -7,26 +7,19 @@ MEV-Boost Relay for Ethereum proposer/builder separation (PBS).
 
 Currently live at:
 
-* https://boost-relay.flashbots.net (also on [Goerli](https://boost-relay-sepolia.flashbots.net) and [Sepolia](https://boost-relay-goerli.flashbots.net))
-* https://relay.ultrasound.money
-* https://agnostic-relay.net
-* bloXroute relays (running a light [fork](https://github.com/bloXroute-Labs/mev-relay))
-* https://mainnet.aestus.live
-* https://relayooor.wtf
-* https://relay.edennetwork.io/info
-* https://mainnet-relay.securerpc.com
+* https://relay.edennetwork.io/info (also on [Goerli](https://goerli.edennetwork.io/info))
 
 #### Components
 
 The relay consists of several components that are designed to run and scale independently and to be as simple as possible:
 
-1. [API](https://github.com/flashbots/mev-boost-relay/tree/main/services/api): for proposer, block builder, data.
-1. [Website](https://github.com/flashbots/mev-boost-relay/tree/main/services/website): handles the root website requests (information is pulled from Redis and database).
-1. [Housekeeper](https://github.com/flashbots/mev-boost-relay/tree/main/services/housekeeper): update known validators, proposer duties.
+1. [API](https://github.com/eden-network/mev-boost-relay/tree/main/services/api): for proposer, block builder, data.
+1. [Website](https://github.com/eden-network/mev-boost-relay/tree/main/services/website): handles the root website requests (information is pulled from Redis and database).
+1. [Housekeeper](https://github.com/eden-network/mev-boost-relay/tree/main/services/housekeeper): update known validators, proposer duties.
 
 #### See also
 
-* [Docker images](https://hub.docker.com/r/flashbots/mev-boost-relay)
+* [Docker images](https://hub.docker.com/r/edennetwork/builder-relay)
 * [mev-boost](https://github.com/flashbots/mev-boost)
 * [Relay API specs](https://flashbots.github.io/relay-specs)
 * [Guider for running mev-boost-relay at scale](https://flashbots.notion.site/Running-mev-boost-relay-at-scale-draft-4040ccd5186c425d9a860cbb29bbfe09)
@@ -77,8 +70,6 @@ If you find a security vulnerability on this project or any other initiative rel
 # Background
 
 MEV is a centralizing force on Ethereum. Unattended, the competition for MEV opportunities leads to consensus security instability and permissioned communication infrastructure between traders and block producers. This erodes neutrality, transparency, decentralization, and permissionlessness.
-
-Flashbots is a research and development organization working on mitigating the negative externalities of MEV. Flashbots started as a builder specializing in MEV extraction in proof-of-work Ethereum to democratize access to MEV and make the most profitable blocks available to all miners. >90% of miners are outsourcing some of their block construction to Flashbots today.
 
 The mev-boost relay is a trusted mediator between block producers and block builders. It enables all Ethereum proof-of-stake validators to offer their blockspace to not just Flashbots but other builders as well. This opens up the market to more builders and creates competition between them, leading to more revenue and choice for validators, and better censorship-resistance for Ethereum.
 
@@ -174,7 +165,9 @@ This builds a local copy of the template and saves it in `website-index.html`
 The website is using:
 * [PureCSS](https://purecss.io/)
 * [HeroIcons](https://heroicons.com/)
+* [Font Awesome](https://fontawesome.com/docs) [icons](https://fontawesome.com/icons)
 
+---
 
 # Technical Notes
 
@@ -354,15 +347,12 @@ WantedBy=default.target
 
 # Maintainers
 
+- [@chpiatt](https://twitter.com.chpiatt)
 - [@metachris](https://twitter.com/metachris)
 - [@Ruteri](https://twitter.com/mmrosum)
 - [@avalonche](https://github.com/avalonche)
 
 # Contributing
-
-[Flashbots](https://flashbots.net) is a research and development collective working on mitigating the negative externalities of decentralized economies. We contribute with the larger free software community to illuminate the dark forest.
-
-You are welcome here <3.
 
 - If you have a question, feedback or a bug report for this project, please [open a new Issue](https://github.com/flashbots/mev-boost/issues).
 - If you would like to contribute with code, check the [CONTRIBUTING file](CONTRIBUTING.md) for further info about the development environment.
@@ -370,16 +360,8 @@ You are welcome here <3.
 
 # Security
 
-If you find a security vulnerability on this project or any other initiative related to Flashbots, please let us know sending an email to security@flashbots.net.
-
-## Audits
-
-- [20220822](docs/audit-20220822.md), by [lotusbumi](https://github.com/lotusbumi).
+If you find a security vulnerability on this project or any other initiative related to Eden, please let us know sending on our [Discord](https://discord.gg/ASwwnAzTX8).
 
 # License
 
 The code in this project is free software under the [AGPL License version 3 or later](LICENSE).
-
----
-
-Made with ☀️ by the ⚡🤖 collective.

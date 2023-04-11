@@ -45,6 +45,7 @@ func init() {
 
 	apiCmd.Flags().StringVar(&apiListenAddr, "listen-addr", apiDefaultListenAddr, "listen address for webserver")
 	apiCmd.Flags().StringSliceVar(&beaconNodeURIs, "beacon-uris", defaultBeaconURIs, "beacon endpoints")
+	apiCmd.Flags().StringSliceVar(&whitelistedBuilderPubKeys, "builder-whitelist", defaultBuilderWhitelist, "whitelisted builders")
 	apiCmd.Flags().StringVar(&redisURI, "redis-uri", defaultRedisURI, "redis uri")
 	apiCmd.Flags().StringVar(&postgresDSN, "db", defaultPostgresDSN, "PostgreSQL DSN")
 	apiCmd.Flags().StringSliceVar(&memcachedURIs, "memcached-uris", defaultMemcachedURIs,
@@ -52,6 +53,7 @@ func init() {
 	apiCmd.Flags().StringVar(&apiSecretKey, "secret-key", apiDefaultSecretKey, "secret key for signing bids")
 	apiCmd.Flags().StringVar(&apiBlockSimURL, "blocksim", apiDefaultBlockSim, "URL for block simulator")
 	apiCmd.Flags().StringVar(&network, "network", defaultNetwork, "Which network to use")
+	apiCmd.Flags().StringSliceVar(&priorityBuilders, "priority-builders", defaultPriorityBuilders, "high priority builders")
 
 	apiCmd.Flags().BoolVar(&apiPprofEnabled, "pprof", apiDefaultPprofEnabled, "enable pprof API")
 	apiCmd.Flags().BoolVar(&apiInternalAPI, "internal-api", apiDefaultInternalAPIEnabled, "enable internal API (/internal/...)")
@@ -128,6 +130,30 @@ var apiCmd = &cobra.Command{
 			log.WithError(err).Fatalf("Failed setting up prod datastore")
 		}
 
+		if len(priorityBuilders) == 0 {
+			log.Infof("no high priority builders specified")
+		} else {
+			log.Infof("Using high priority builders: %s", strings.Join(priorityBuilders, ", "))
+			for _, builderPubkey := range priorityBuilders {
+				newStatus := datastore.MakeBlockBuilderStatus(true, false)
+				err := redis.SetBlockBuilderStatus(builderPubkey, newStatus)
+				if err != nil {
+					log.WithError(err).Errorf("could not set block builder status in redis for builder: %s", builderPubkey)
+				}
+
+				err = db.SetBlockBuilderStatus(builderPubkey, true, false)
+				if err != nil {
+					log.WithError(err).Errorf("could not set block builder status in database for builder: %s", builderPubkey)
+				}
+			}
+		}
+
+		whitelistedBuilders := make(map[string]bool)
+		log.Infof("Whitelisted builders: %s", strings.Join(whitelistedBuilderPubKeys, ", "))
+		for _, pubkey := range whitelistedBuilderPubKeys {
+			whitelistedBuilders[pubkey] = true
+		}
+
 		opts := api.RelayAPIOpts{
 			Log:           log,
 			ListenAddr:    apiListenAddr,
@@ -144,6 +170,8 @@ var apiCmd = &cobra.Command{
 			DataAPI:         true,
 			InternalAPI:     apiInternalAPI,
 			PprofAPI:        apiPprofEnabled,
+
+			BuilderWhitelist: whitelistedBuilders,
 		}
 
 		// Decode the private key
