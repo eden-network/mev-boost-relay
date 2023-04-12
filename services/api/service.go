@@ -73,7 +73,7 @@ var (
 	numActiveValidatorProcessors = cli.GetEnvInt("NUM_ACTIVE_VALIDATOR_PROCESSORS", 10)
 	numValidatorRegProcessors    = cli.GetEnvInt("NUM_VALIDATOR_REG_PROCESSORS", 10)
 	timeoutGetPayloadRetryMs     = cli.GetEnvInt("GETPAYLOAD_RETRY_TIMEOUT_MS", 100)
-	getPayloadRequestCutoffMs    = cli.GetEnvInt("GETPAYLOAD_REQUEST_CUTOFF_MS", 4000)
+	getPayloadRequestCutoffMs    = cli.GetEnvInt("GETPAYLOAD_REQUEST_CUTOFF_MS", 2500)
 	getPayloadPublishDelayMs     = cli.GetEnvInt("GETPAYLOAD_PUBLISH_DELAY_MS", 0)
 	getPayloadResponseDelayMs    = cli.GetEnvInt("GETPAYLOAD_RESPONSE_DELAY_MS", 1000)
 
@@ -1161,6 +1161,13 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 
 	if payload.Message() == nil || !payload.HasExecutionPayload() {
 		api.RespondError(w, http.StatusBadRequest, "missing parts of the payload")
+		return
+	}
+
+	if !api.opts.BuilderWhitelist[payload.BuilderPubkey().String()] {
+		msg := fmt.Sprintf("rejecting submission - builder not whitelisted: %s", payload.BuilderPubkey().String())
+		log.Info(msg)
+		api.RespondError(w, http.StatusBadRequest, "builder not whitelisted")
 		return
 	}
 
